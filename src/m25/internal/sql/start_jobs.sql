@@ -1,8 +1,8 @@
 update m25.job
 set
-    failure_reason = $2,
-    finished_at = now()
-where id = $1
+    started_at = now(),
+    deadline = now() + make_interval(secs => $2)
+where id = any($1)
 returning
     id,
     queue_name,

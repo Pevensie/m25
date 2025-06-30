@@ -1,6 +1,7 @@
 update m25.job
 set
-    failure_reason = $2,
+    failure_reason = 'error',
+    error_data = $2,
     finished_at = now()
 where id = $1
 returning

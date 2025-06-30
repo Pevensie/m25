@@ -1,11 +1,12 @@
 update m25.job
 set
-    failure_reason = $2,
+    failure_reason = 'job_timeout',
     finished_at = now()
-where id = $1
+where queue_name = $1
+    and status = 'executing'
+    and now() > deadline
 returning
     id,
-    queue_name,
     status,
     input,
     attempt,

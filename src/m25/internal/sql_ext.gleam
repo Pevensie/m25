@@ -43,6 +43,7 @@ pub fn insert_job(
   arg_7,
   arg_8,
   arg_9,
+  arg_10,
 ) {
   let decoder = {
     use id <- decode.field(0, uuid_decoder())
@@ -66,46 +67,49 @@ pub fn insert_job(
   }
 
   "insert into m25.job (
-  queue_name,
-  scheduled_at,
-  input,
-  attempt,
-  max_attempts,
-  original_attempt_id,
-  previous_attempt_id,
-  retry_delay,
-  unique_key
-) values (
-  $1,
-  to_timestamp($2),
-  $3::text::jsonb,
-  $4,
-  $5,
-  $6,
-  $7,
-  make_interval(secs => $8),
-  $9
-) returning
     id,
-    status,
+    queue_name,
+    scheduled_at,
     input,
     attempt,
     max_attempts,
     original_attempt_id,
     previous_attempt_id,
-    -- TODO: use duration once supported in Squirrel
-    extract(epoch from retry_delay)::int as retry_delay;
+    retry_delay,
+    unique_key
+  ) values (
+    $1,
+    $2,
+    to_timestamp($3),
+    $4::text::jsonb,
+    $5,
+    $6,
+    $7,
+    $8,
+    make_interval(secs => $9),
+    $10
+  ) returning
+      id,
+      status,
+      input,
+      attempt,
+      max_attempts,
+      original_attempt_id,
+      previous_attempt_id,
+      -- TODO: use duration once supported in Squirrel
+      extract(epoch from retry_delay)::int as retry_delay;
 "
   |> pog.query
-  |> pog.parameter(pog.text(arg_1))
-  |> pog.parameter(pog.nullable(pog.float, arg_2))
-  |> pog.parameter(pog.text(arg_3))
-  |> pog.parameter(pog.int(arg_4))
+  |> pog.parameter(pog.text(uuid.to_string(arg_1)))
+  |> pog.parameter(pog.text(arg_2))
+  |> pog.parameter(pog.nullable(pog.float, arg_3))
+  |> pog.parameter(pog.text(arg_4))
   |> pog.parameter(pog.int(arg_5))
-  |> pog.parameter(pog.nullable(pog.text, option.map(arg_6, uuid.to_string)))
+  |> pog.parameter(pog.int(arg_6))
   |> pog.parameter(pog.nullable(pog.text, option.map(arg_7, uuid.to_string)))
-  |> pog.parameter(pog.float(arg_8))
-  |> pog.parameter(pog.nullable(pog.text, arg_9))
+  |> pog.parameter(pog.nullable(pog.text, option.map(arg_8, uuid.to_string)))
+  |> pog.parameter(pog.float(arg_9))
+  |> pog.parameter(pog.nullable(pog.text, arg_10))
   |> pog.returning(decoder)
   |> pog.execute(db)
 }

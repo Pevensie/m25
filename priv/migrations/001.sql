@@ -8,11 +8,24 @@ create table if not exists m25.job (
     input jsonb not null,
 
     -- Status tracking
-    status text not null default 'pending',
     started_at timestamptz,
+    cancelled_at timestamptz,
     finished_at timestamptz,
     output jsonb,
-    error jsonb,
+    deadline timestamptz,
+    latest_heartbeat_at timestamptz,
+    failure_reason text,
+    error_data jsonb,
+
+    status text not null generated always as (
+        case
+            when cancelled_at is not null then 'cancelled'
+            when started_at is null then 'pending'
+            when finished_at is null then 'executing'
+            when failure_reason is null then 'success'
+            else 'failed'
+        end
+    ) stored,
 
     -- Attempt tracking
     attempt integer not null,

@@ -82,3 +82,11 @@ pub fn delete_by_value(bimap: Bimap(a, b), value: b) -> Bimap(a, b) {
     }
   }
 }
+
+pub fn size(bimap: Bimap(a, b)) -> Int {
+  dict.size(bimap.from_key)
+}
+
+pub fn to_list(bimap: Bimap(a, b)) -> List(#(a, b)) {
+  dict.to_list(bimap.from_key)
+}

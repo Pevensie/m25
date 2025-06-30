@@ -1,4 +1,5 @@
 insert into m25.job (
+  id,
   queue_name,
   scheduled_at,
   input,
@@ -10,14 +11,15 @@ insert into m25.job (
   unique_key
 ) values (
   $1,
-  to_timestamp($2),
-  $3::text::jsonb,
-  $4,
+  $2,
+  to_timestamp($3),
+  $4::text::jsonb,
   $5,
   $6,
   $7,
-  make_interval(secs => $8),
-  $9
+  $8,
+  make_interval(secs => $9),
+  $10
 ) returning
     id,
     status,
