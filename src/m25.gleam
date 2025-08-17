@@ -13,6 +13,7 @@ import gleam/otp/supervision
 import gleam/result
 import gleam/string
 import gleam/time/timestamp
+import logging
 import m25/internal/bimap
 import m25/internal/sql
 import m25/internal/sql_ext
@@ -33,6 +34,14 @@ pub type Queue(input, output, error) {
     output_to_json: fn(output) -> json.Json,
     error_to_json: fn(error) -> json.Json,
     handler_function: fn(input) -> Result(output, error),
+    /// How long a job may run in milliseconds before it is considered failed.
+    job_timeout: Int,
+    /// How frequently the queue manager should check the database for new jobs in milliseconds.
+    poll_interval: Int,
+    /// How frequently to send heartbeat to the individual job manager in milliseconds.
+    heartbeat_interval: Int,
+    /// How long a job executor actor may take to initialise in milliseconds.
+    executor_init_timeout: Int,
   )
 }
 
@@ -101,18 +110,22 @@ pub fn add_queue(
 /// using [`supervised`](#supervised) to start M25 as part of your supervision tree.
 pub fn start(
   m25: M25,
+  queue_init_timeout: Int,
 ) -> Result(actor.Started(sup.Supervisor), actor.StartError) {
-  supervisor_spec(m25)
+  supervisor_spec(m25, queue_init_timeout)
   |> sup.start
 }
 
 /// Create a child spec for the M25 process, allowing it to be run as part of a
 /// supervision tree.
-pub fn supervised(m25: M25) -> supervision.ChildSpecification(sup.Supervisor) {
-  supervision.supervisor(fn() { start(m25) })
+pub fn supervised(
+  m25: M25,
+  queue_init_timeout: Int,
+) -> supervision.ChildSpecification(sup.Supervisor) {
+  supervision.supervisor(fn() { start(m25, queue_init_timeout) })
 }
 
-fn supervisor_spec(m25: M25) {
+fn supervisor_spec(m25: M25, queue_init_timeout: Int) {
   let supervisor = sup.new(sup.OneForOne)
 
   m25.queues
@@ -120,7 +133,7 @@ fn supervisor_spec(m25: M25) {
     sup.add(
       supervisor,
       supervision.worker(fn() {
-        queue_manager_spec(queue, m25.conn)
+        queue_manager_spec(queue, m25.conn, queue_init_timeout)
         |> actor.start
       })
         |> supervision.restart(supervision.Transient),
@@ -251,31 +264,51 @@ type ExecutableJob(input, output, error) {
   )
 }
 
+type ExecutableJobFetchError {
+  ExecutableJobFetchQueryError(pog.QueryError)
+  ExecutableJobFetchDecodeError(json.DecodeError)
+}
+
 fn fetch_executable_jobs(
   conn: pog.Connection,
   queue: Queue(input, output, error),
   limit: Int,
-) -> Result(List(ExecutableJob(input, d, e)), json.DecodeError) {
-  let assert Ok(jobs) = sql.fetch_executable_jobs(conn, queue.name, limit)
+) -> Result(List(ExecutableJob(input, d, e)), ExecutableJobFetchError) {
+  use jobs <- result.try(
+    sql.fetch_executable_jobs(conn, queue.name, limit)
+    |> result.map_error(ExecutableJobFetchQueryError),
+  )
 
   jobs.rows
-  |> list.map(fn(job) {
-    let assert Ok(status) = job_status_from_string(job.status)
-    let job_id = JobId(value: job.id)
-    job.input
-    |> json.parse(queue.input_decoder)
-    |> result.map(ExecutableJob(
-      id: job_id,
-      status:,
-      input: _,
-      attempt: job.attempt,
-      max_attempts: job.max_attempts,
-      original_attempt_id: option.map(job.original_attempt_id, JobId),
-      previous_attempt_id: option.map(job.previous_attempt_id, JobId),
-      retry_delay_seconds: job.retry_delay,
-    ))
+  |> list.filter_map(fn(job) {
+    case job_status_from_string(job.status) {
+      Ok(status) -> {
+        let job_id = JobId(value: job.id)
+        job.input
+        |> json.parse(queue.input_decoder)
+        |> result.map(ExecutableJob(
+          id: job_id,
+          status:,
+          input: _,
+          attempt: job.attempt,
+          max_attempts: job.max_attempts,
+          original_attempt_id: option.map(job.original_attempt_id, JobId),
+          previous_attempt_id: option.map(job.previous_attempt_id, JobId),
+          retry_delay_seconds: job.retry_delay,
+        ))
+        |> Ok
+      }
+      Error(_) -> {
+        logging.log(
+          logging.Error,
+          "Invalid job status \"" <> job.status <> "\", skipping job",
+        )
+        Error(Nil)
+      }
+    }
   })
   |> result.all
+  |> result.map_error(ExecutableJobFetchDecodeError)
 }
 
 fn start_jobs(conn: pog.Connection, jobs: List(JobId), timeout: Int) {
@@ -284,6 +317,10 @@ fn start_jobs(conn: pog.Connection, jobs: List(JobId), timeout: Int) {
     list.map(jobs, fn(job_id) { job_id.value }),
     int.to_float(timeout) /. 1000.0,
   )
+}
+
+fn set_jobs_to_pending(conn: pog.Connection, job_ids: List(JobId)) {
+  sql.set_jobs_to_pending(conn, list.map(job_ids, fn(job_id) { job_id.value }))
 }
 
 fn succeed_job(conn: pog.Connection, job_id: JobId, output: json.Json) {
@@ -325,6 +362,10 @@ fn insert_job(
   )
 }
 
+fn time_out_jobs(conn: pog.Connection, queue_name: String) {
+  sql.time_out_jobs(conn, queue_name)
+}
+
 /// Returns a boolean representing whether the job has hit a heartbeat timeout
 fn execute_job_heartbeat(
   conn,
@@ -348,6 +389,12 @@ fn timestamp_to_unix_seconds_float(timestamp: timestamp.Timestamp) -> Float {
 
 // ----- Operations ------ //
 
+type JobUpdateError {
+  JobNotFound(JobId)
+  TooManyJobsReturned(List(JobId))
+  JobUpdateQueryError(pog.QueryError)
+}
+
 fn handle_errored_job(
   conn: pog.Connection,
   queue: Queue(input, output, error),
@@ -355,11 +402,18 @@ fn handle_errored_job(
   error: error,
 ) {
   use conn <- pog.transaction(conn)
-  let assert Ok(failed_job) =
+  use failed_job <- result.try(
     error_job(conn, job_id, queue.error_to_json(error))
-  let assert [row] = failed_job.rows
-  retry_jobs_if_needed(conn, [row.id])
-  |> result.map_error(string.inspect)
+    |> result.map_error(JobUpdateQueryError),
+  )
+  case failed_job.rows {
+    [] -> Error(JobNotFound(job_id))
+    [row] ->
+      retry_jobs_if_needed(conn, [row.id])
+      |> result.map_error(JobUpdateQueryError)
+    rows ->
+      Error(TooManyJobsReturned(list.map(rows, fn(row) { JobId(row.id) })))
+  }
 }
 
 fn handle_failed_job(
@@ -368,11 +422,18 @@ fn handle_failed_job(
   failure_reason: FailureReason,
 ) {
   use conn <- pog.transaction(conn)
-  let assert Ok(crashed_job) = fail_job(conn, job_id, failure_reason)
-  let assert [row] = crashed_job.rows
-
-  retry_jobs_if_needed(conn, [row.id])
-  |> result.map_error(string.inspect)
+  use crashed_job <- result.try(
+    fail_job(conn, job_id, failure_reason)
+    |> result.map_error(JobUpdateQueryError),
+  )
+  case crashed_job.rows {
+    [] -> Error(JobNotFound(job_id))
+    [row] ->
+      retry_jobs_if_needed(conn, [row.id])
+      |> result.map_error(JobUpdateQueryError)
+    rows ->
+      Error(TooManyJobsReturned(list.map(rows, fn(row) { JobId(row.id) })))
+  }
 }
 
 fn retry_jobs_if_needed(conn: pog.Connection, job_ids: List(uuid.Uuid)) {
@@ -397,33 +458,34 @@ type QueueManagerState(input, output, error) {
     queue: Queue(input, output, error),
     conn: pog.Connection,
     running_jobs: bimap.Bimap(JobId, process.Pid),
-    heartbeat_interval: Int,
   )
 }
 
-fn queue_manager_spec(queue: Queue(input, output, error), conn: pog.Connection) {
-  actor.new_with_initialiser(
-    // TODO: Implement timeout logic
-    10_000,
-    fn(self) {
-      process.send(self, ProcessJobs)
+fn queue_manager_spec(
+  queue: Queue(input, output, error),
+  conn: pog.Connection,
+  queue_init_timeout: Int,
+) {
+  actor.new_with_initialiser(queue_init_timeout, fn(self) {
+    process.send(self, ProcessJobs)
 
-      let selector =
-        process.new_selector()
-        |> process.select(self)
-        |> process.select_monitors(JobExecutorDown)
+    let selector =
+      process.new_selector()
+      |> process.select(self)
+      |> process.select_monitors(JobExecutorDown)
 
-      // TODO: custom heartbeat interval
-      let heartbeat_interval = 3000
-
-      QueueManagerState(self, queue, conn, bimap.new(), heartbeat_interval:)
-      |> actor.initialised
-      |> actor.selecting(selector)
-      |> actor.returning(self)
-      |> Ok
-    },
-  )
+    QueueManagerState(self, queue, conn, bimap.new())
+    |> actor.initialised
+    |> actor.selecting(selector)
+    |> actor.returning(self)
+    |> Ok
+  })
   |> actor.on_message(handle_queue_message)
+}
+
+type ProcessJobsError {
+  ProcessJobsQueryError(when: String, error: pog.QueryError)
+  ProcessJobsFetchError(ExecutableJobFetchError)
 }
 
 fn handle_queue_message(
@@ -437,13 +499,21 @@ fn handle_queue_message(
     ProcessJobs -> {
       let start_process_result =
         pog.transaction(state.conn, fn(conn) {
-          let assert Ok(timed_out) =
-            sql.time_out_jobs(state.conn, state.queue.name)
+          use timed_out <- result.try(
+            time_out_jobs(state.conn, state.queue.name)
+            |> result.map_error(fn(err) {
+              ProcessJobsQueryError(when: "timing out jobs", error: err)
+            }),
+          )
 
-          let assert Ok(_) =
+          use _ <- result.try(
             timed_out.rows
             |> list.map(fn(row) { row.id })
             |> retry_jobs_if_needed(conn, _)
+            |> result.map_error(fn(err) {
+              ProcessJobsQueryError(when: "retrying jobs", error: err)
+            }),
+          )
 
           let limit =
             int.max(
@@ -453,11 +523,24 @@ fn handle_queue_message(
 
           use <- bool.guard(when: limit == 0, return: Ok(state))
 
-          let assert Ok(executable_jobs) =
+          use executable_jobs <- result.try(
             fetch_executable_jobs(conn, state.queue, limit)
+            |> result.map_error(ProcessJobsFetchError),
+          )
 
-          let assert Ok(started) =
-            list.try_map(executable_jobs, fn(job) {
+          use _ <- result.try(
+            start_jobs(
+              conn,
+              list.map(executable_jobs, fn(job) { job.id }),
+              state.queue.job_timeout,
+            )
+            |> result.map_error(fn(err) {
+              ProcessJobsQueryError(when: "marking jobs as started", error: err)
+            }),
+          )
+
+          let #(started, start_errors) =
+            list.map(executable_jobs, fn(job) {
               job_executor_spec(
                 state.conn,
                 state.queue,
@@ -465,11 +548,51 @@ fn handle_queue_message(
                 state.queue.handler_function,
                 job.input,
                 state.self,
-                state.heartbeat_interval,
               )
               |> actor.start
               |> result.map(fn(started) { #(job.id, started.data) })
+              |> result.map_error(fn(err) { #(job.id, err) })
             })
+            |> result.partition
+
+          case start_errors {
+            [] -> Nil
+            // If all failed, return an error
+            start_errors -> {
+              let failure_reason =
+                list.map(start_errors, fn(error) {
+                  let error_string = case error.1 {
+                    actor.InitExited(reason) ->
+                      "Init exited: " <> string.inspect(reason)
+                    actor.InitFailed(reason) -> "Init failed: " <> reason
+                    actor.InitTimeout -> "Init timeout"
+                  }
+                  uuid.to_string({ error.0 }.value) <> ": " <> error_string
+                })
+                |> string.join("\n")
+
+              logging.log(
+                logging.Error,
+                "Failed to start actor(s):\n" <> failure_reason,
+              )
+
+              let job_ids = list.map(start_errors, fn(error) { error.0 })
+
+              // TODO: figure out a nicer way of handling this
+              case set_jobs_to_pending(conn, job_ids) {
+                Ok(_) -> Nil
+                Error(_) ->
+                  logging.log(
+                    logging.Error,
+                    "Failed to reset jobs to pending status: "
+                      <> list.map(job_ids, fn(job_id) {
+                      uuid.to_string(job_id.value)
+                    })
+                    |> string.join(", "),
+                  )
+              }
+            }
+          }
 
           let running_jobs =
             list.fold(started, state.running_jobs, fn(running, job_data) {
@@ -477,24 +600,47 @@ fn handle_queue_message(
               bimap.insert(running, job_data.0, job_data.1)
             })
 
-          let assert Ok(_) =
-            start_jobs(
-              conn,
-              list.map(executable_jobs, fn(job) { job.id }),
-              // TODO: configurable job timeout
-              // For now, 1 hour
-              60 * 60 * 1000,
-            )
-
           Ok(QueueManagerState(..state, running_jobs:))
         })
 
-      // TODO: use start_process_result
-      let assert Ok(new_state) = start_process_result
+      case start_process_result {
+        Ok(new_state) -> {
+          process.send_after(state.self, state.queue.poll_interval, ProcessJobs)
+          actor.continue(new_state)
+        }
+        Error(start_process_error) -> {
+          case start_process_error {
+            pog.TransactionQueryError(query_error) ->
+              logging.log(
+                logging.Error,
+                "Failed to run transaction to start jobs: "
+                  <> string.inspect(query_error),
+              )
+            pog.TransactionRolledBack(ProcessJobsQueryError(when:, error:)) ->
+              logging.log(
+                logging.Error,
+                "Postgres query failed when "
+                  <> when
+                  <> ": "
+                  <> string.inspect(error),
+              )
+            pog.TransactionRolledBack(ProcessJobsFetchError(error)) ->
+              logging.log(
+                logging.Error,
+                "Postgres query failed when fetching executable jobs: "
+                  <> case error {
+                  ExecutableJobFetchDecodeError(decode_error) ->
+                    "Decode error: " <> string.inspect(decode_error)
+                  ExecutableJobFetchQueryError(query_error) ->
+                    "Query error: " <> string.inspect(query_error)
+                },
+              )
+          }
 
-      // TODO: allow configurable poll interval
-      process.send_after(state.self, 3000, ProcessJobs)
-      actor.continue(new_state)
+          process.send_after(state.self, state.queue.poll_interval, ProcessJobs)
+          actor.continue(state)
+        }
+      }
     }
     WorkSucceeded(job_id:, output:) -> {
       let assert Ok(_) =
@@ -575,65 +721,59 @@ fn job_executor_spec(
   work_func: fn(input) -> Result(output, error),
   input,
   manager_subject: process.Subject(QueueManagerMsg(input, output, error)),
-  heartbeat_interval: Int,
 ) {
-  actor.new_with_initialiser(
-    // TODO: custom timeout
-    1000,
-    fn(self) {
-      process.trap_exits(True)
+  actor.new_with_initialiser(queue.executor_init_timeout, fn(self) {
+    process.trap_exits(True)
 
-      let worker_function = fn() {
-        // Wait a second to let the queue manager start monitoring the executor
-        process.sleep(1000)
+    let worker_function = fn() {
+      // Wait a second to let the queue manager start monitoring the executor
+      process.sleep(1000)
 
-        let message = case work_func(input) {
-          Ok(output) -> ExecutionSucceeded(output)
-          Error(error) -> ExecutionFailed(error)
-        }
-
-        process.send(self, message)
+      let message = case work_func(input) {
+        Ok(output) -> ExecutionSucceeded(output)
+        Error(error) -> ExecutionFailed(error)
       }
 
-      let worker_pid = process.spawn(worker_function)
+      process.send(self, message)
+    }
 
-      use manager_pid <- result.try(
-        process.subject_owner(manager_subject)
-        |> result.replace_error(
-          "Failed to get queue manager PID for job ID: "
-          <> uuid.format(job_id.value, uuid.String),
-        ),
-      )
+    let worker_pid = process.spawn(worker_function)
 
-      let manager_monitor = process.monitor(manager_pid)
+    use manager_pid <- result.try(
+      process.subject_owner(manager_subject)
+      |> result.replace_error(
+        "Failed to get queue manager PID for job ID: "
+        <> uuid.format(job_id.value, uuid.String),
+      ),
+    )
 
-      let selector =
-        process.new_selector()
-        |> process.select(self)
-        |> process.select_trapped_exits(WorkerDown)
-        |> process.select_specific_monitor(manager_monitor, ManagerDown)
+    let manager_monitor = process.monitor(manager_pid)
 
-      // Subject was not created from a PID
-      let assert Ok(self_pid) = process.subject_owner(self)
+    let selector =
+      process.new_selector()
+      |> process.select(self)
+      |> process.select_trapped_exits(WorkerDown)
+      |> process.select_specific_monitor(manager_monitor, ManagerDown)
 
-      process.send_after(self, heartbeat_interval, Heartbeat)
+    // Subject was not created from a PID
+    let assert Ok(self_pid) = process.subject_owner(self)
 
-      JobExecutorState(
-        self:,
-        conn:,
-        queue:,
-        job_id:,
-        worker_pid:,
-        manager: manager_subject,
-        // TODO: custom heartbeat interval
-        heartbeat_interval:,
-      )
-      |> actor.initialised
-      |> actor.selecting(selector)
-      |> actor.returning(self_pid)
-      |> Ok
-    },
-  )
+    process.send_after(self, queue.heartbeat_interval, Heartbeat)
+
+    JobExecutorState(
+      self:,
+      conn:,
+      queue:,
+      job_id:,
+      worker_pid:,
+      manager: manager_subject,
+      heartbeat_interval: queue.heartbeat_interval,
+    )
+    |> actor.initialised
+    |> actor.selecting(selector)
+    |> actor.returning(self_pid)
+    |> Ok
+  })
   |> actor.on_message(handle_job_executor_message)
 }
 

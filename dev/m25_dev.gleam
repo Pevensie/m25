@@ -8,13 +8,16 @@ import m25
 import pog
 
 pub fn main() -> Nil {
-  let conn =
-    pog.default_config()
+  let pool_name = process.new_name("pog")
+  let assert Ok(started) =
+    pog.default_config(pool_name)
     |> pog.user("postgres")
     |> pog.password(option.Some("postgres"))
     |> pog.database("postgres")
     |> pog.ssl(pog.SslDisabled)
-    |> pog.connect
+    |> pog.start
+
+  let conn = started.data
 
   let success_queue =
     m25.Queue(
@@ -28,6 +31,10 @@ pub fn main() -> Nil {
         io.println("Running job with input: " <> input)
         Ok("Ok")
       },
+      job_timeout: 60 * 60 * 1000,
+      poll_interval: 5000,
+      heartbeat_interval: 3000,
+      executor_init_timeout: 1000,
     )
   let fail_queue =
     m25.Queue(..success_queue, name: "fail-queue", handler_function: fn(input) {
@@ -64,6 +71,6 @@ pub fn main() -> Nil {
   let assert Ok(_) = m25.enqueue(conn, crash_queue, crash_job)
   let assert Ok(_) = m25.enqueue(conn, long_queue, long_job)
 
-  let assert Ok(_supervisor) = m25.start(m25)
+  let assert Ok(_supervisor) = m25.start(m25, 10_000)
   process.sleep_forever()
 }
