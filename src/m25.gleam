@@ -15,10 +15,15 @@ import gleam/string
 import gleam/time/timestamp
 import logging
 import m25/internal/bimap
+import m25/internal/cli
 import m25/internal/sql
 import m25/internal/sql_ext
 import pog
 import youid/uuid
+
+pub fn main() {
+  cli.run_cli()
+}
 
 /// A queue to be used by M25. All of the input, output and error values must
 /// be serialisable to JSON so that they may be inserted into the database.

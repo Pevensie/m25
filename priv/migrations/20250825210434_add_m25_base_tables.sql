@@ -43,3 +43,8 @@ create table if not exists m25.job (
 create unique index job_unique_key_idx
 on m25.job(unique_key)
 where status not in ('failed', 'cancelled');
+
+create table if not exists m25.version (
+  version timestamptz not null primary key,
+  created_at timestamptz not null default now()
+);
