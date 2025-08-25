@@ -24,6 +24,17 @@ fn add_error_context(error: String, context: String) {
   context <> ": " <> error
 }
 
+fn print(message: String, silent: Bool) {
+  case silent {
+    False -> io.print_error(message)
+    True -> Nil
+  }
+}
+
+fn println(message: String, silent: Bool) {
+  print(message <> "\n", silent)
+}
+
 fn check_m25_schema_exists(tx: pog.Connection) -> Result(Bool, String) {
   let query_result =
     pog.query(
@@ -146,8 +157,9 @@ values (timestamptz '" <> {
 fn apply_migrations(
   tx: pog.Connection,
   migration_sql: String,
+  silent: Bool,
 ) -> Result(Nil, String) {
-  io.print_error("Applying migrations for m25... ")
+  print("Applying migrations for m25... ", silent)
 
   use last_char <- result.try(
     string.last(migration_sql |> string.trim_end)
@@ -168,12 +180,16 @@ fn apply_migrations(
     |> result.map_error(string.inspect)
 
   use _ <- result.try(query_result)
-  io.println_error("ok.")
+  println("ok.", silent)
   Ok(Nil)
 }
 
-fn handle_migration(tx: pog.Connection, apply: Bool) -> Result(Nil, String) {
-  io.print_error("Checking schema... ")
+fn handle_migration(
+  tx: pog.Connection,
+  apply: Bool,
+  silent: Bool,
+) -> Result(Nil, String) {
+  print("Checking schema... ", silent)
   use schema_exists <- result.try(
     check_m25_schema_exists(tx)
     |> result.map_error(add_error_context(
@@ -181,9 +197,9 @@ fn handle_migration(tx: pog.Connection, apply: Bool) -> Result(Nil, String) {
       "Unable to check if 'm25' schema exists",
     )),
   )
-  io.println_error("ok.")
+  println("ok.", silent)
 
-  io.print_error("Checking current version of m25 tables... ")
+  print("Checking current version of m25 tables... ", silent)
   let version_result = case schema_exists {
     False -> Ok(option.None)
     True ->
@@ -195,14 +211,15 @@ fn handle_migration(tx: pog.Connection, apply: Bool) -> Result(Nil, String) {
   }
 
   use current_version <- result.try(version_result)
-  io.println_error(
+  println(
     "ok. Current version: "
-    <> current_version
+      <> current_version
     |> option.map(timestamp.to_rfc3339(_, calendar.utc_offset))
     |> option.unwrap("none"),
+    silent,
   )
 
-  io.print_error("Getting migrations for m25 tables... ")
+  print("Getting migrations for m25 tables... ", silent)
   use migration_sql <- result.try(
     get_migrations_to_apply(current_version)
     |> result.map_error(add_error_context(
@@ -210,17 +227,17 @@ fn handle_migration(tx: pog.Connection, apply: Bool) -> Result(Nil, String) {
       "Failed to get migrations to apply for m25 tables",
     )),
   )
-  io.println_error("ok.")
+  println("ok.", silent)
 
   case migration_sql {
     option.None -> {
-      io.println_error("No migrations to apply for m25 tables\n")
+      println("No migrations to apply for m25 tables\n", silent)
       Ok(Nil)
     }
     option.Some(migration_sql) -> {
       case apply {
         True ->
-          apply_migrations(tx, migration_sql)
+          apply_migrations(tx, migration_sql, silent)
           |> result.map_error(add_error_context(
             _,
             "Failed to apply migrations for m25 tables",
@@ -232,6 +249,10 @@ fn handle_migration(tx: pog.Connection, apply: Bool) -> Result(Nil, String) {
       }
     }
   }
+}
+
+pub fn migrate_for_tests(tx: pog.Connection) -> Result(Nil, String) {
+  handle_migration(tx, True, True)
 }
 
 fn connection_string_flag() -> glint.Flag(String) {
@@ -248,15 +269,23 @@ fn apply_flag() -> glint.Flag(Bool) {
   |> glint.flag_default(False)
 }
 
+fn silent_flag() -> glint.Flag(Bool) {
+  glint.bool_flag("silent")
+  |> glint.flag_help("Don't print messages to stderr")
+  |> glint.flag_default(False)
+}
+
 fn migrate_command() {
   use <- glint.command_help("Migrate M25 modules in your Postgres database")
   use connection_string_arg <- glint.flag(connection_string_flag())
   use apply_flag <- glint.flag(apply_flag())
+  use silent_flag <- glint.flag(silent_flag())
 
   use _, _, flags <- glint.command()
 
   use connection_string <- result.try(connection_string_arg(flags))
   use apply <- result.try(apply_flag(flags))
+  use silent <- result.try(silent_flag(flags))
 
   let pool_name = process.new_name("m25_migrations")
 
@@ -271,10 +300,10 @@ fn migrate_command() {
   let assert Ok(actor.Started(_, conn)) = pog.start(config)
   let transaction_result =
     pog.transaction(conn, fn(tx) {
-      use _ <- result.try(handle_migration(tx, apply))
+      use _ <- result.try(handle_migration(tx, apply, silent))
 
       case apply {
-        True -> io.println_error("\nSuccess! Applied migrations for m25")
+        True -> println("\nSuccess! Applied migrations for m25", silent)
         False -> Nil
       }
       Ok(Nil)
@@ -302,5 +331,5 @@ pub fn run_cli() {
 
   use cli_result <- glint.run_and_handle(cli, argv.load().arguments)
   use errors <- result.map_error(cli_result)
-  io.println_error("Command failed with an error: " <> errors.issue)
+  println("Command failed with an error: " <> errors.issue, False)
 }
