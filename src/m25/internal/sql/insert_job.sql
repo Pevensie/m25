@@ -13,7 +13,7 @@ insert into m25.job (
   $1,
   $2,
   to_timestamp($3),
-  $4::text::jsonb,
+  $4,
   $5,
   $6,
   $7,

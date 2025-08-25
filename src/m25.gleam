@@ -40,6 +40,8 @@ pub type Queue(input, output, error) {
     poll_interval: Int,
     /// How frequently to send heartbeat to the individual job manager in milliseconds.
     heartbeat_interval: Int,
+    /// How many times the heartbeat is allowed to be missed before the job is considered failed.
+    allowed_heartbeat_misses: Int,
     /// How long a job executor actor may take to initialise in milliseconds.
     executor_init_timeout: Int,
     /// How long a job can stay in the 'reserved' state before it should be reverted to 'pending'.
@@ -52,29 +54,15 @@ fn queue_to_dynamic_queue(
   queue: Queue(input, output, error),
 ) -> Queue(dynamic.Dynamic, dynamic.Dynamic, dynamic.Dynamic)
 
-pub type TableConfig {
-  TableConfig(schema: String, jobs_table: String)
-}
-
-/// Creates a new `TableConfig` with the default values.
-pub fn default_table_config() -> TableConfig {
-  TableConfig(schema: "m25", jobs_table: "job")
-}
-
 pub opaque type M25 {
   M25(
     conn: pog.Connection,
-    table_config: TableConfig,
     queues: List(Queue(dynamic.Dynamic, dynamic.Dynamic, dynamic.Dynamic)),
   )
 }
 
 pub fn new(conn: pog.Connection) -> M25 {
-  M25(conn:, table_config: default_table_config(), queues: [])
-}
-
-pub fn with_table_config(m25: M25, table_config: TableConfig) -> M25 {
-  M25(..m25, table_config:)
+  M25(conn:, queues: [])
 }
 
 /// Register a queue to be used by M25. All of the input, output and error values must
@@ -85,7 +73,6 @@ pub fn with_table_config(m25: M25, table_config: TableConfig) -> M25 {
 /// ```gleam
 /// pub fn main() {
 ///   let assert Ok(m25) = m25.new(config)
-///     |> m25.with_table_config(table_config)
 ///     |> m25.add_queue(queue1)
 ///     |> result.try(m25.add_queue(_, queue2))
 ///     |> result.try(m25.add_queue(_, queue3))
@@ -341,8 +328,16 @@ fn finalize_job_reservations(
   )
 }
 
-fn cleanup_stuck_reservations(conn: pog.Connection, timeout: Int) {
-  sql.cleanup_stuck_reservations(conn, int.to_float(timeout) /. 1000.0)
+fn cleanup_stuck_reservations(
+  conn: pog.Connection,
+  queue_name: String,
+  timeout: Int,
+) {
+  sql.cleanup_stuck_reservations(
+    conn,
+    queue_name,
+    int.to_float(timeout) /. 1000.0,
+  )
 }
 
 fn insert_job(
@@ -362,7 +357,7 @@ fn insert_job(
     uuid.v7(),
     queue_name,
     option.map(scheduled_at, timestamp_to_unix_seconds_float),
-    json.to_string(input),
+    input,
     attempt,
     max_attempts,
     original_attempt_id,
@@ -511,7 +506,11 @@ fn handle_queue_message(
         pog.transaction(state.conn, fn(conn) {
           // Clean up any stuck reservations first
           use _ <- result.try(
-            cleanup_stuck_reservations(conn, state.queue.reserved_timeout)
+            cleanup_stuck_reservations(
+              conn,
+              state.queue.name,
+              state.queue.reserved_timeout,
+            )
             |> result.map_error(fn(err) {
               ProcessJobsQueryError(
                 when: "cleaning up stuck reservations",
@@ -617,7 +616,9 @@ fn handle_queue_message(
 
                   logging.log(
                     logging.Warning,
-                    "Some actors failed to start (jobs reset to pending):\n"
+                    "Some actors failed to start (jobs reset to pending) for queue "
+                      <> state.queue.name
+                      <> ": \n"
                       <> failure_reason,
                   )
                 }
@@ -633,7 +634,9 @@ fn handle_queue_message(
             Error(finalize_error) -> {
               logging.log(
                 logging.Error,
-                "Failed to finalize job reservations: "
+                "Failed to finalize job reservations for queue "
+                  <> state.queue.name
+                  <> ": "
                   <> string.inspect(finalize_error),
               )
 
@@ -655,12 +658,17 @@ fn handle_queue_message(
             pog.TransactionQueryError(query_error) ->
               logging.log(
                 logging.Error,
-                "Failed to reserve jobs: " <> string.inspect(query_error),
+                "Failed to reserve jobs for queue "
+                  <> state.queue.name
+                  <> ": "
+                  <> string.inspect(query_error),
               )
             pog.TransactionRolledBack(ProcessJobsQueryError(when:, error:)) ->
               logging.log(
                 logging.Error,
-                "Transaction rolled back when "
+                "Transaction rolled back for queue "
+                  <> state.queue.name
+                  <> " when "
                   <> when
                   <> ": "
                   <> string.inspect(error),
@@ -670,13 +678,17 @@ fn handle_queue_message(
                 ExecutableJobFetchQueryError(query_error) ->
                   logging.log(
                     logging.Error,
-                    "Query error when reserving jobs: "
+                    "Query error when reserving jobs for queue "
+                      <> state.queue.name
+                      <> ": "
                       <> string.inspect(query_error),
                   )
                 ExecutableJobFetchDecodeError(decode_error) ->
                   logging.log(
                     logging.Error,
-                    "Decode error when reserving jobs: "
+                    "Decode error when reserving jobs for queue "
+                      <> state.queue.name
+                      <> ": "
                       <> string.inspect(decode_error),
                   )
               }
@@ -688,17 +700,41 @@ fn handle_queue_message(
       }
     }
     WorkSucceeded(job_id:, output:) -> {
-      let assert Ok(_) =
+      case
         retry_exponential(3, fn() {
           succeed_job(state.conn, job_id, state.queue.output_to_json(output))
         })
+      {
+        Ok(_) -> Nil
+        Error(query_error) ->
+          logging.log(
+            logging.Error,
+            "Query error when succeeding job"
+              <> uuid.to_string(job_id.value)
+              <> ": "
+              <> string.inspect(query_error),
+          )
+      }
 
       let running_jobs = bimap.delete_by_key(state.running_jobs, job_id)
       actor.continue(QueueManagerState(..state, running_jobs:))
     }
     WorkFailed(job_id:, error:) -> {
-      let assert Ok(_) =
-        handle_errored_job(state.conn, state.queue, job_id, error)
+      case
+        retry_exponential(3, fn() {
+          handle_errored_job(state.conn, state.queue, job_id, error)
+        })
+      {
+        Ok(_) -> Nil
+        Error(query_error) ->
+          logging.log(
+            logging.Error,
+            "Query error when failing job due to failed work for job: "
+              <> uuid.to_string(job_id.value)
+              <> " error: "
+              <> string.inspect(query_error),
+          )
+      }
 
       let running_jobs = bimap.delete_by_key(state.running_jobs, job_id)
       actor.continue(QueueManagerState(..state, running_jobs:))
@@ -715,7 +751,21 @@ fn handle_queue_message(
       case bimap.get_by_value(state.running_jobs, pid) {
         Error(_) -> actor.continue(state)
         Ok(job_id) -> {
-          let assert Ok(_) = handle_failed_job(state.conn, job_id, Crash)
+          case
+            retry_exponential(3, fn() {
+              handle_failed_job(state.conn, job_id, Crash)
+            })
+          {
+            Ok(_) -> Nil
+            Error(query_error) ->
+              logging.log(
+                logging.Error,
+                "Query error when failing job due to downed executor for job "
+                  <> uuid.to_string(job_id.value)
+                  <> ": "
+                  <> string.inspect(query_error),
+              )
+          }
 
           let running_jobs = bimap.delete_by_key(state.running_jobs, job_id)
           actor.continue(QueueManagerState(..state, running_jobs:))
@@ -723,7 +773,21 @@ fn handle_queue_message(
       }
     }
     JobWorkerDown(job_id:) -> {
-      let assert Ok(_) = handle_failed_job(state.conn, job_id, Crash)
+      case
+        retry_exponential(3, fn() {
+          handle_failed_job(state.conn, job_id, Crash)
+        })
+      {
+        Ok(_) -> Nil
+        Error(query_error) ->
+          logging.log(
+            logging.Error,
+            "Query error when failing job due to downed worker for job "
+              <> uuid.to_string(job_id.value)
+              <> ": "
+              <> string.inspect(query_error),
+          )
+      }
 
       let running_jobs = bimap.delete_by_key(state.running_jobs, job_id)
       actor.continue(QueueManagerState(..state, running_jobs:))
@@ -756,7 +820,6 @@ type JobExecutorState(input, output, error) {
     job_id: JobId,
     worker_pid: option.Option(process.Pid),
     manager: process.Subject(QueueManagerMsg(input, output, error)),
-    heartbeat_interval: Int,
     work_func: fn(input) -> Result(output, error),
     input: input,
   )
@@ -799,7 +862,6 @@ fn job_executor_spec(
       job_id:,
       worker_pid: option.None,
       manager: manager_subject,
-      heartbeat_interval: queue.heartbeat_interval,
       work_func:,
       input:,
     )
@@ -838,34 +900,65 @@ fn handle_job_executor_message(
       )
     }
     Heartbeat -> {
-      let assert Ok(timed_out) =
-        execute_job_heartbeat(
-          state.conn,
-          state.job_id,
-          // TODO: custom allowed misses
-          3,
-          state.heartbeat_interval,
-        )
-
-      case timed_out.rows {
-        [sql.HeartbeatRow(deadline_passed: True, ..)] -> {
-          // If past deadline, just kill - queue manager will handle marking as timed
-          // out and retrying
-          option.map(state.worker_pid, process.kill)
+      case
+        retry_exponential(3, fn() {
+          execute_job_heartbeat(
+            state.conn,
+            state.job_id,
+            state.queue.allowed_heartbeat_misses,
+            state.queue.heartbeat_interval,
+          )
+        })
+      {
+        Ok(timed_out) -> {
+          case timed_out.rows {
+            [sql.HeartbeatRow(deadline_passed: True, ..)] -> {
+              // If past deadline, just kill - queue manager will handle marking as timed
+              // out and retrying
+              option.map(state.worker_pid, process.kill)
+              actor.stop()
+            }
+            [sql.HeartbeatRow(heartbeat_timed_out: False, ..)] -> {
+              process.send_after(
+                state.self,
+                state.queue.heartbeat_interval,
+                Heartbeat,
+              )
+              actor.continue(state)
+            }
+            [sql.HeartbeatRow(heartbeat_timed_out: True, ..)] -> {
+              option.map(state.worker_pid, process.kill)
+              case
+                retry_exponential(3, fn() {
+                  fail_job(state.conn, state.job_id, HeartbeatTimeout)
+                })
+              {
+                Ok(_) -> Nil
+                Error(query_error) ->
+                  logging.log(
+                    logging.Error,
+                    "Query error when failing job due to heartbeat timeout for job "
+                      <> uuid.to_string(state.job_id.value)
+                      <> ": "
+                      <> string.inspect(query_error),
+                  )
+              }
+              actor.stop()
+            }
+            [] -> actor.continue(state)
+            _ -> panic as "This should never return more than one row!"
+          }
+        }
+        Error(query_error) -> {
+          logging.log(
+            logging.Error,
+            "Query error when checking heartbeat for job "
+              <> uuid.to_string(state.job_id.value)
+              <> ": "
+              <> string.inspect(query_error),
+          )
           actor.stop()
         }
-        [sql.HeartbeatRow(heartbeat_timed_out: False, ..)] -> {
-          process.send_after(state.self, state.heartbeat_interval, Heartbeat)
-          actor.continue(state)
-        }
-        [sql.HeartbeatRow(heartbeat_timed_out: True, ..)] -> {
-          option.map(state.worker_pid, process.kill)
-          let assert Ok(_) =
-            fail_job(state.conn, state.job_id, HeartbeatTimeout)
-          actor.stop()
-        }
-        [] -> actor.continue(state)
-        _ -> panic as "This should never return more than one row!"
       }
     }
     ExecutionSucceeded(output:) -> {
@@ -887,7 +980,22 @@ fn handle_job_executor_message(
     }
     ManagerDown(_) -> {
       option.map(state.worker_pid, process.kill)
-      let assert Ok(_) = handle_failed_job(state.conn, state.job_id, Crash)
+      case
+        retry_exponential(3, fn() {
+          handle_failed_job(state.conn, state.job_id, Crash)
+        })
+      {
+        Ok(_) -> Nil
+        Error(query_error) ->
+          logging.log(
+            logging.Error,
+            "Query error when failing job due to downed manager for job "
+              <> uuid.to_string(state.job_id.value)
+              <> ": "
+              <> string.inspect(query_error),
+          )
+      }
+
       actor.stop()
     }
   }

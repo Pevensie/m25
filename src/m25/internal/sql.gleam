@@ -26,7 +26,7 @@ pub type CleanupStuckReservationsRow {
 /// > 🐿️ This function was generated automatically using v4.2.0 of
 /// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
 ///
-pub fn cleanup_stuck_reservations(db, arg_1) {
+pub fn cleanup_stuck_reservations(db, arg_1, arg_2) {
   let decoder = {
     use id <- decode.field(0, uuid_decoder())
     use queue_name <- decode.field(1, decode.string)
@@ -37,11 +37,13 @@ pub fn cleanup_stuck_reservations(db, arg_1) {
 set
     reserved_at = null
 where status = 'reserved'
-    and reserved_at < now() - make_interval(secs => $1)
+    and queue_name = $1
+    and reserved_at < now() - make_interval(secs => $2)
 returning id, queue_name;
 "
   |> pog.query
-  |> pog.parameter(pog.float(arg_1))
+  |> pog.parameter(pog.text(arg_1))
+  |> pog.parameter(pog.float(arg_2))
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
@@ -379,7 +381,7 @@ pub fn insert_job(
   $1,
   $2,
   to_timestamp($3),
-  $4::text::jsonb,
+  $4,
   $5,
   $6,
   $7,
@@ -401,7 +403,7 @@ pub fn insert_job(
   |> pog.parameter(pog.text(uuid.to_string(arg_1)))
   |> pog.parameter(pog.text(arg_2))
   |> pog.parameter(pog.float(arg_3))
-  |> pog.parameter(pog.text(arg_4))
+  |> pog.parameter(pog.text(json.to_string(arg_4)))
   |> pog.parameter(pog.int(arg_5))
   |> pog.parameter(pog.int(arg_6))
   |> pog.parameter(pog.text(uuid.to_string(arg_7)))

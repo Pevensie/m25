@@ -3,6 +3,7 @@
 //// `sql.gleam` and modified to support nullable columns.
 
 import gleam/dynamic/decode
+import gleam/json
 import gleam/option.{type Option}
 import pog
 import youid/uuid.{type Uuid}
@@ -103,7 +104,7 @@ pub fn insert_job(
   |> pog.parameter(pog.text(uuid.to_string(arg_1)))
   |> pog.parameter(pog.text(arg_2))
   |> pog.parameter(pog.nullable(pog.float, arg_3))
-  |> pog.parameter(pog.text(arg_4))
+  |> pog.parameter(pog.text(json.to_string(arg_4)))
   |> pog.parameter(pog.int(arg_5))
   |> pog.parameter(pog.int(arg_6))
   |> pog.parameter(pog.nullable(pog.text, option.map(arg_7, uuid.to_string)))
