@@ -42,6 +42,8 @@ pub type Queue(input, output, error) {
     heartbeat_interval: Int,
     /// How long a job executor actor may take to initialise in milliseconds.
     executor_init_timeout: Int,
+    /// How long a job can stay in the 'reserved' state before it should be reverted to 'pending'.
+    reserved_timeout: Int,
   )
 }
 
@@ -212,6 +214,7 @@ pub fn enqueue(conn, queue: Queue(input, output, error), job: Job(input)) {
 
 type JobStatus {
   Pending
+  Reserved
   Executing
   Succeeded
   Failed
@@ -221,6 +224,7 @@ type JobStatus {
 fn job_status_from_string(maybe_status: String) -> Result(JobStatus, Nil) {
   case maybe_status {
     "pending" -> Ok(Pending)
+    "reserved" -> Ok(Reserved)
     "executing" -> Ok(Executing)
     "succeeded" -> Ok(Succeeded)
     "failed" -> Ok(Failed)
@@ -269,13 +273,25 @@ type ExecutableJobFetchError {
   ExecutableJobFetchDecodeError(json.DecodeError)
 }
 
-fn fetch_executable_jobs(
+fn succeed_job(conn: pog.Connection, job_id: JobId, output: json.Json) {
+  sql.succeed_job(conn, job_id.value, output)
+}
+
+fn error_job(conn: pog.Connection, job_id: JobId, error: json.Json) {
+  sql.error_job(conn, job_id.value, error)
+}
+
+fn fail_job(conn: pog.Connection, job_id: JobId, reason: FailureReason) {
+  sql.fail_job(conn, job_id.value, failure_reason_to_string(reason))
+}
+
+fn reserve_jobs(
   conn: pog.Connection,
   queue: Queue(input, output, error),
   limit: Int,
-) -> Result(List(ExecutableJob(input, d, e)), ExecutableJobFetchError) {
+) {
   use jobs <- result.try(
-    sql.fetch_executable_jobs(conn, queue.name, limit)
+    sql.reserve_jobs(conn, queue.name, limit)
     |> result.map_error(ExecutableJobFetchQueryError),
   )
 
@@ -311,28 +327,22 @@ fn fetch_executable_jobs(
   |> result.map_error(ExecutableJobFetchDecodeError)
 }
 
-fn start_jobs(conn: pog.Connection, jobs: List(JobId), timeout: Int) {
-  sql.start_jobs(
+fn finalize_job_reservations(
+  conn: pog.Connection,
+  successful_job_ids: List(JobId),
+  failed_job_ids: List(JobId),
+  timeout: Int,
+) {
+  sql.finalize_job_reservations(
     conn,
-    list.map(jobs, fn(job_id) { job_id.value }),
+    list.map(successful_job_ids, fn(id) { id.value }),
     int.to_float(timeout) /. 1000.0,
+    list.map(failed_job_ids, fn(id) { id.value }),
   )
 }
 
-fn set_jobs_to_pending(conn: pog.Connection, job_ids: List(JobId)) {
-  sql.set_jobs_to_pending(conn, list.map(job_ids, fn(job_id) { job_id.value }))
-}
-
-fn succeed_job(conn: pog.Connection, job_id: JobId, output: json.Json) {
-  sql.succeed_job(conn, job_id.value, output)
-}
-
-fn error_job(conn: pog.Connection, job_id: JobId, error: json.Json) {
-  sql.error_job(conn, job_id.value, error)
-}
-
-fn fail_job(conn: pog.Connection, job_id: JobId, reason: FailureReason) {
-  sql.fail_job(conn, job_id.value, failure_reason_to_string(reason))
+fn cleanup_stuck_reservations(conn: pog.Connection, timeout: Int) {
+  sql.cleanup_stuck_reservations(conn, int.to_float(timeout) /. 1000.0)
 }
 
 fn insert_job(
@@ -497,10 +507,21 @@ fn handle_queue_message(
 ) {
   case message {
     ProcessJobs -> {
-      let start_process_result =
+      let reserved_jobs_result =
         pog.transaction(state.conn, fn(conn) {
+          // Clean up any stuck reservations first
+          use _ <- result.try(
+            cleanup_stuck_reservations(conn, state.queue.reserved_timeout)
+            |> result.map_error(fn(err) {
+              ProcessJobsQueryError(
+                when: "cleaning up stuck reservations",
+                error: err,
+              )
+            }),
+          )
+
           use timed_out <- result.try(
-            time_out_jobs(state.conn, state.queue.name)
+            time_out_jobs(conn, state.queue.name)
             |> result.map_error(fn(err) {
               ProcessJobsQueryError(when: "timing out jobs", error: err)
             }),
@@ -521,26 +542,21 @@ fn handle_queue_message(
               0,
             )
 
-          use <- bool.guard(when: limit == 0, return: Ok(state))
+          use <- bool.guard(when: limit == 0, return: Ok([]))
 
-          use executable_jobs <- result.try(
-            fetch_executable_jobs(conn, state.queue, limit)
+          use reserved_jobs <- result.try(
+            reserve_jobs(conn, state.queue, limit)
             |> result.map_error(ProcessJobsFetchError),
           )
 
-          use _ <- result.try(
-            start_jobs(
-              conn,
-              list.map(executable_jobs, fn(job) { job.id }),
-              state.queue.job_timeout,
-            )
-            |> result.map_error(fn(err) {
-              ProcessJobsQueryError(when: "marking jobs as started", error: err)
-            }),
-          )
+          Ok(reserved_jobs)
+        })
 
+      case reserved_jobs_result {
+        Ok(reserved_jobs) -> {
+          // Phase 2: Start actors outside transaction
           let #(started, start_errors) =
-            list.map(executable_jobs, fn(job) {
+            list.map(reserved_jobs, fn(job) {
               job_executor_spec(
                 state.conn,
                 state.queue,
@@ -555,86 +571,115 @@ fn handle_queue_message(
             })
             |> result.partition
 
-          case start_errors {
-            [] -> Nil
-            // If all failed, return an error
-            start_errors -> {
-              let failure_reason =
-                list.map(start_errors, fn(error) {
-                  let error_string = case error.1 {
-                    actor.InitExited(reason) ->
-                      "Init exited: " <> string.inspect(reason)
-                    actor.InitFailed(reason) -> "Init failed: " <> reason
-                    actor.InitTimeout -> "Init timeout"
-                  }
-                  uuid.to_string({ error.0 }.value) <> ": " <> error_string
-                })
-                |> string.join("\n")
+          // Phase 3: Finalize reservations in database
+          let successful_ids = list.map(started, fn(s) { s.0 })
+          let failed_ids = list.map(start_errors, fn(e) { e.0 })
 
-              logging.log(
-                logging.Error,
-                "Failed to start actor(s):\n" <> failure_reason,
+          let finalize_result =
+            pog.transaction(state.conn, fn(conn) {
+              finalize_job_reservations(
+                conn,
+                successful_ids,
+                failed_ids,
+                state.queue.job_timeout,
               )
-
-              let job_ids = list.map(start_errors, fn(error) { error.0 })
-
-              // TODO: figure out a nicer way of handling this
-              case set_jobs_to_pending(conn, job_ids) {
-                Ok(_) -> Nil
-                Error(_) ->
-                  logging.log(
-                    logging.Error,
-                    "Failed to reset jobs to pending status: "
-                      <> list.map(job_ids, fn(job_id) {
-                      uuid.to_string(job_id.value)
-                    })
-                    |> string.join(", "),
-                  )
-              }
-            }
-          }
-
-          let running_jobs =
-            list.fold(started, state.running_jobs, fn(running, job_data) {
-              process.monitor(job_data.1)
-              bimap.insert(running, job_data.0, job_data.1)
+              |> result.map_error(fn(err) {
+                ProcessJobsQueryError(
+                  when: "finalizing job reservations",
+                  error: err,
+                )
+              })
             })
 
-          Ok(QueueManagerState(..state, running_jobs:))
-        })
+          case finalize_result {
+            Ok(_) -> {
+              let running_jobs =
+                list.fold(started, state.running_jobs, fn(running, job_data) {
+                  process.monitor(job_data.1.1)
+                  process.send(job_data.1.0, StartWork)
+                  bimap.insert(running, job_data.0, job_data.1.1)
+                })
 
-      case start_process_result {
-        Ok(new_state) -> {
-          process.send_after(state.self, state.queue.poll_interval, ProcessJobs)
-          actor.continue(new_state)
+              case start_errors {
+                [] -> Nil
+                errors -> {
+                  let failure_reason =
+                    list.map(errors, fn(error) {
+                      let error_string = case error.1 {
+                        actor.InitExited(reason) ->
+                          "Init exited: " <> string.inspect(reason)
+                        actor.InitFailed(reason) -> "Init failed: " <> reason
+                        actor.InitTimeout -> "Init timeout"
+                      }
+                      uuid.to_string({ error.0 }.value) <> ": " <> error_string
+                    })
+                    |> string.join("\n")
+
+                  logging.log(
+                    logging.Warning,
+                    "Some actors failed to start (jobs reset to pending):\n"
+                      <> failure_reason,
+                  )
+                }
+              }
+
+              process.send_after(
+                state.self,
+                state.queue.poll_interval,
+                ProcessJobs,
+              )
+              actor.continue(QueueManagerState(..state, running_jobs:))
+            }
+            Error(finalize_error) -> {
+              logging.log(
+                logging.Error,
+                "Failed to finalize job reservations: "
+                  <> string.inspect(finalize_error),
+              )
+
+              // Kill all started executors - they won't have started work yet as we
+              // haven't sent the `StartWork` messages.
+              list.each(started, fn(job_data) { process.kill(job_data.1.1) })
+
+              process.send_after(
+                state.self,
+                state.queue.poll_interval,
+                ProcessJobs,
+              )
+              actor.continue(state)
+            }
+          }
         }
-        Error(start_process_error) -> {
-          case start_process_error {
+        Error(reserve_error) -> {
+          case reserve_error {
             pog.TransactionQueryError(query_error) ->
               logging.log(
                 logging.Error,
-                "Failed to run transaction to start jobs: "
-                  <> string.inspect(query_error),
+                "Failed to reserve jobs: " <> string.inspect(query_error),
               )
             pog.TransactionRolledBack(ProcessJobsQueryError(when:, error:)) ->
               logging.log(
                 logging.Error,
-                "Postgres query failed when "
+                "Transaction rolled back when "
                   <> when
                   <> ": "
                   <> string.inspect(error),
               )
-            pog.TransactionRolledBack(ProcessJobsFetchError(error)) ->
-              logging.log(
-                logging.Error,
-                "Postgres query failed when fetching executable jobs: "
-                  <> case error {
-                  ExecutableJobFetchDecodeError(decode_error) ->
-                    "Decode error: " <> string.inspect(decode_error)
-                  ExecutableJobFetchQueryError(query_error) ->
-                    "Query error: " <> string.inspect(query_error)
-                },
-              )
+            pog.TransactionRolledBack(ProcessJobsFetchError(fetch_error)) ->
+              case fetch_error {
+                ExecutableJobFetchQueryError(query_error) ->
+                  logging.log(
+                    logging.Error,
+                    "Query error when reserving jobs: "
+                      <> string.inspect(query_error),
+                  )
+                ExecutableJobFetchDecodeError(decode_error) ->
+                  logging.log(
+                    logging.Error,
+                    "Decode error when reserving jobs: "
+                      <> string.inspect(decode_error),
+                  )
+              }
           }
 
           process.send_after(state.self, state.queue.poll_interval, ProcessJobs)
@@ -696,6 +741,7 @@ fn handle_queue_message(
 
 type JobExecutorMessage(output, error) {
   Heartbeat
+  StartWork
   ExecutionSucceeded(output: output)
   ExecutionFailed(error: error)
   WorkerDown(process.ExitMessage)
@@ -708,9 +754,11 @@ type JobExecutorState(input, output, error) {
     conn: pog.Connection,
     queue: Queue(input, output, error),
     job_id: JobId,
-    worker_pid: process.Pid,
+    worker_pid: option.Option(process.Pid),
     manager: process.Subject(QueueManagerMsg(input, output, error)),
     heartbeat_interval: Int,
+    work_func: fn(input) -> Result(output, error),
+    input: input,
   )
 }
 
@@ -724,20 +772,6 @@ fn job_executor_spec(
 ) {
   actor.new_with_initialiser(queue.executor_init_timeout, fn(self) {
     process.trap_exits(True)
-
-    let worker_function = fn() {
-      // Wait a second to let the queue manager start monitoring the executor
-      process.sleep(1000)
-
-      let message = case work_func(input) {
-        Ok(output) -> ExecutionSucceeded(output)
-        Error(error) -> ExecutionFailed(error)
-      }
-
-      process.send(self, message)
-    }
-
-    let worker_pid = process.spawn(worker_function)
 
     use manager_pid <- result.try(
       process.subject_owner(manager_subject)
@@ -758,20 +792,20 @@ fn job_executor_spec(
     // Subject was not created from a PID
     let assert Ok(self_pid) = process.subject_owner(self)
 
-    process.send_after(self, queue.heartbeat_interval, Heartbeat)
-
     JobExecutorState(
       self:,
       conn:,
       queue:,
       job_id:,
-      worker_pid:,
+      worker_pid: option.None,
       manager: manager_subject,
       heartbeat_interval: queue.heartbeat_interval,
+      work_func:,
+      input:,
     )
     |> actor.initialised
     |> actor.selecting(selector)
-    |> actor.returning(self_pid)
+    |> actor.returning(#(self, self_pid))
     |> Ok
   })
   |> actor.on_message(handle_job_executor_message)
@@ -779,9 +813,30 @@ fn job_executor_spec(
 
 fn handle_job_executor_message(
   state: JobExecutorState(input, output, error),
-  message,
+  message: JobExecutorMessage(output, error),
 ) {
   case message {
+    // The worker is only spawned once we get the StartWork message to avoid the
+    // database getting out of sync with reality if we fail to take jobs out of
+    // the 'reserved' state.
+    StartWork -> {
+      let worker_function = fn() {
+        let message = case state.work_func(state.input) {
+          Ok(output) -> ExecutionSucceeded(output)
+          Error(error) -> ExecutionFailed(error)
+        }
+
+        process.send(state.self, message)
+      }
+
+      let worker_pid = process.spawn(worker_function)
+
+      process.send_after(state.self, state.queue.heartbeat_interval, Heartbeat)
+
+      actor.continue(
+        JobExecutorState(..state, worker_pid: option.Some(worker_pid)),
+      )
+    }
     Heartbeat -> {
       let assert Ok(timed_out) =
         execute_job_heartbeat(
@@ -796,7 +851,7 @@ fn handle_job_executor_message(
         [sql.HeartbeatRow(deadline_passed: True, ..)] -> {
           // If past deadline, just kill - queue manager will handle marking as timed
           // out and retrying
-          process.kill(state.worker_pid)
+          option.map(state.worker_pid, process.kill)
           actor.stop()
         }
         [sql.HeartbeatRow(heartbeat_timed_out: False, ..)] -> {
@@ -804,7 +859,7 @@ fn handle_job_executor_message(
           actor.continue(state)
         }
         [sql.HeartbeatRow(heartbeat_timed_out: True, ..)] -> {
-          process.kill(state.worker_pid)
+          option.map(state.worker_pid, process.kill)
           let assert Ok(_) =
             fail_job(state.conn, state.job_id, HeartbeatTimeout)
           actor.stop()
@@ -831,7 +886,7 @@ fn handle_job_executor_message(
       }
     }
     ManagerDown(_) -> {
-      process.kill(state.worker_pid)
+      option.map(state.worker_pid, process.kill)
       let assert Ok(_) = handle_failed_job(state.conn, state.job_id, Crash)
       actor.stop()
     }

@@ -8,6 +8,7 @@ create table if not exists m25.job (
     input jsonb not null,
 
     -- Status tracking
+    reserved_at timestamptz,
     started_at timestamptz,
     cancelled_at timestamptz,
     finished_at timestamptz,
@@ -20,9 +21,10 @@ create table if not exists m25.job (
     status text not null generated always as (
         case
             when cancelled_at is not null then 'cancelled'
-            when started_at is null then 'pending'
+            when reserved_at is null then 'pending'
+            when started_at is null then 'reserved'
             when finished_at is null then 'executing'
-            when failure_reason is null then 'success'
+            when failure_reason is null then 'succeeded'
             else 'failed'
         end
     ) stored,

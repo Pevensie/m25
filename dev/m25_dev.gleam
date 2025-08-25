@@ -35,6 +35,7 @@ pub fn main() -> Nil {
       poll_interval: 5000,
       heartbeat_interval: 3000,
       executor_init_timeout: 1000,
+      reserved_timeout: 300_000,
     )
   let fail_queue =
     m25.Queue(..success_queue, name: "fail-queue", handler_function: fn(input) {

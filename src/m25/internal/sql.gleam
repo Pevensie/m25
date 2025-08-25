@@ -10,6 +10,42 @@ import gleam/option.{type Option}
 import pog
 import youid/uuid.{type Uuid}
 
+/// A row you get from running the `cleanup_stuck_reservations` query
+/// defined in `./src/m25/internal/sql/cleanup_stuck_reservations.sql`.
+///
+/// > 🐿️ This type definition was generated automatically using v4.2.0 of the
+/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub type CleanupStuckReservationsRow {
+  CleanupStuckReservationsRow(id: Uuid, queue_name: String)
+}
+
+/// Runs the `cleanup_stuck_reservations` query
+/// defined in `./src/m25/internal/sql/cleanup_stuck_reservations.sql`.
+///
+/// > 🐿️ This function was generated automatically using v4.2.0 of
+/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub fn cleanup_stuck_reservations(db, arg_1) {
+  let decoder = {
+    use id <- decode.field(0, uuid_decoder())
+    use queue_name <- decode.field(1, decode.string)
+    decode.success(CleanupStuckReservationsRow(id:, queue_name:))
+  }
+
+  "update m25.job
+set
+    reserved_at = null
+where status = 'reserved'
+    and reserved_at < now() - make_interval(secs => $1)
+returning id, queue_name;
+"
+  |> pog.query
+  |> pog.parameter(pog.float(arg_1))
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
 /// A row you get from running the `error_job` query
 /// defined in `./src/m25/internal/sql/error_job.sql`.
 ///
@@ -167,73 +203,58 @@ returning
   |> pog.execute(db)
 }
 
-/// A row you get from running the `fetch_executable_jobs` query
-/// defined in `./src/m25/internal/sql/fetch_executable_jobs.sql`.
+/// A row you get from running the `finalize_job_reservations` query
+/// defined in `./src/m25/internal/sql/finalize_job_reservations.sql`.
 ///
 /// > 🐿️ This type definition was generated automatically using v4.2.0 of the
 /// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
 ///
-pub type FetchExecutableJobsRow {
-  FetchExecutableJobsRow(
-    id: Uuid,
-    status: String,
-    input: String,
-    attempt: Int,
-    max_attempts: Int,
-    original_attempt_id: Option(Uuid),
-    previous_attempt_id: Option(Uuid),
-    retry_delay: Int,
-  )
+pub type FinalizeJobReservationsRow {
+  FinalizeJobReservationsRow(successful_count: Int, failed_count: Int)
 }
 
-/// Runs the `fetch_executable_jobs` query
-/// defined in `./src/m25/internal/sql/fetch_executable_jobs.sql`.
+/// Promote successful reservations to executing, revert failures to pending
 ///
 /// > 🐿️ This function was generated automatically using v4.2.0 of
 /// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
 ///
-pub fn fetch_executable_jobs(db, arg_1, arg_2) {
+pub fn finalize_job_reservations(db, arg_1, arg_2, arg_3) {
   let decoder = {
-    use id <- decode.field(0, uuid_decoder())
-    use status <- decode.field(1, decode.string)
-    use input <- decode.field(2, decode.string)
-    use attempt <- decode.field(3, decode.int)
-    use max_attempts <- decode.field(4, decode.int)
-    use original_attempt_id <- decode.field(5, decode.optional(uuid_decoder()))
-    use previous_attempt_id <- decode.field(6, decode.optional(uuid_decoder()))
-    use retry_delay <- decode.field(7, decode.int)
-    decode.success(FetchExecutableJobsRow(
-      id:,
-      status:,
-      input:,
-      attempt:,
-      max_attempts:,
-      original_attempt_id:,
-      previous_attempt_id:,
-      retry_delay:,
-    ))
+    use successful_count <- decode.field(0, decode.int)
+    use failed_count <- decode.field(1, decode.int)
+    decode.success(FinalizeJobReservationsRow(successful_count:, failed_count:))
   }
 
-  "select
-    id,
-    status,
-    input,
-    attempt,
-    max_attempts,
-    original_attempt_id,
-    previous_attempt_id,
-    -- TODO: use duration once supported in Squirrel
-    extract(epoch from retry_delay)::int as retry_delay
-from m25.job
-where queue_name = $1
-    and status = 'pending'
-    and (scheduled_at <= now() or scheduled_at is null)
-limit $2
-for update skip locked
+  "-- Promote successful reservations to executing, revert failures to pending
+with successful_jobs as (
+    update m25.job
+    set
+        started_at = now(),
+        deadline = now() + make_interval(secs => $2)
+    where id = any($1)
+        and status = 'reserved'
+    returning id
+),
+failed_jobs as (
+    update m25.job
+    set
+        reserved_at = null
+    where id = any($3)
+        and status = 'reserved'
+    returning id
+)
+select
+    (select count(*) from successful_jobs) as successful_count,
+    (select count(*) from failed_jobs) as failed_count;
 "
   |> pog.query
-  |> pog.parameter(pog.text(arg_1))
-  |> pog.parameter(pog.int(arg_2))
+  |> pog.parameter(
+    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_1),
+  )
+  |> pog.parameter(pog.float(arg_2))
+  |> pog.parameter(
+    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_3),
+  )
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
@@ -391,6 +412,82 @@ pub fn insert_job(
   |> pog.execute(db)
 }
 
+/// A row you get from running the `reserve_jobs` query
+/// defined in `./src/m25/internal/sql/reserve_jobs.sql`.
+///
+/// > 🐿️ This type definition was generated automatically using v4.2.0 of the
+/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub type ReserveJobsRow {
+  ReserveJobsRow(
+    id: Uuid,
+    status: String,
+    input: String,
+    attempt: Int,
+    max_attempts: Int,
+    original_attempt_id: Option(Uuid),
+    previous_attempt_id: Option(Uuid),
+    retry_delay: Int,
+  )
+}
+
+/// Runs the `reserve_jobs` query
+/// defined in `./src/m25/internal/sql/reserve_jobs.sql`.
+///
+/// > 🐿️ This function was generated automatically using v4.2.0 of
+/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub fn reserve_jobs(db, arg_1, arg_2) {
+  let decoder = {
+    use id <- decode.field(0, uuid_decoder())
+    use status <- decode.field(1, decode.string)
+    use input <- decode.field(2, decode.string)
+    use attempt <- decode.field(3, decode.int)
+    use max_attempts <- decode.field(4, decode.int)
+    use original_attempt_id <- decode.field(5, decode.optional(uuid_decoder()))
+    use previous_attempt_id <- decode.field(6, decode.optional(uuid_decoder()))
+    use retry_delay <- decode.field(7, decode.int)
+    decode.success(ReserveJobsRow(
+      id:,
+      status:,
+      input:,
+      attempt:,
+      max_attempts:,
+      original_attempt_id:,
+      previous_attempt_id:,
+      retry_delay:,
+    ))
+  }
+
+  "update m25.job
+set
+    reserved_at = now()
+where id in (
+    select id
+    from m25.job
+    where queue_name = $1
+        and status = 'pending'
+        and (scheduled_at <= now() or scheduled_at is null)
+    order by created_at
+    limit $2
+    for update skip locked
+)
+returning
+    id,
+    status,
+    input,
+    attempt,
+    max_attempts,
+    original_attempt_id,
+    previous_attempt_id,
+    extract(epoch from retry_delay)::int as retry_delay;"
+  |> pog.query
+  |> pog.parameter(pog.text(arg_1))
+  |> pog.parameter(pog.int(arg_2))
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
 /// Runs the `retry_if_needed` query
 /// defined in `./src/m25/internal/sql/retry_if_needed.sql`.
 ///
@@ -430,109 +527,6 @@ pub fn retry_if_needed(db, arg_1) {
   |> pog.parameter(
     pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_1),
   )
-  |> pog.returning(decoder)
-  |> pog.execute(db)
-}
-
-/// Runs the `set_jobs_to_pending` query
-/// defined in `./src/m25/internal/sql/set_jobs_to_pending.sql`.
-///
-/// > 🐿️ This function was generated automatically using v4.2.0 of
-/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
-///
-pub fn set_jobs_to_pending(db, arg_1) {
-  let decoder = decode.map(decode.dynamic, fn(_) { Nil })
-
-  "update m25.job
-set
-    started_at = null,
-    deadline = null
-where id = any($1);
-"
-  |> pog.query
-  |> pog.parameter(
-    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_1),
-  )
-  |> pog.returning(decoder)
-  |> pog.execute(db)
-}
-
-/// A row you get from running the `start_jobs` query
-/// defined in `./src/m25/internal/sql/start_jobs.sql`.
-///
-/// > 🐿️ This type definition was generated automatically using v4.2.0 of the
-/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
-///
-pub type StartJobsRow {
-  StartJobsRow(
-    id: Uuid,
-    queue_name: String,
-    status: String,
-    input: String,
-    attempt: Int,
-    max_attempts: Int,
-    original_attempt_id: Option(Uuid),
-    previous_attempt_id: Option(Uuid),
-    retry_delay: Int,
-    unique_key: Option(String),
-  )
-}
-
-/// Runs the `start_jobs` query
-/// defined in `./src/m25/internal/sql/start_jobs.sql`.
-///
-/// > 🐿️ This function was generated automatically using v4.2.0 of
-/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
-///
-pub fn start_jobs(db, arg_1, arg_2) {
-  let decoder = {
-    use id <- decode.field(0, uuid_decoder())
-    use queue_name <- decode.field(1, decode.string)
-    use status <- decode.field(2, decode.string)
-    use input <- decode.field(3, decode.string)
-    use attempt <- decode.field(4, decode.int)
-    use max_attempts <- decode.field(5, decode.int)
-    use original_attempt_id <- decode.field(6, decode.optional(uuid_decoder()))
-    use previous_attempt_id <- decode.field(7, decode.optional(uuid_decoder()))
-    use retry_delay <- decode.field(8, decode.int)
-    use unique_key <- decode.field(9, decode.optional(decode.string))
-    decode.success(StartJobsRow(
-      id:,
-      queue_name:,
-      status:,
-      input:,
-      attempt:,
-      max_attempts:,
-      original_attempt_id:,
-      previous_attempt_id:,
-      retry_delay:,
-      unique_key:,
-    ))
-  }
-
-  "update m25.job
-set
-    started_at = now(),
-    deadline = now() + make_interval(secs => $2)
-where id = any($1)
-returning
-    id,
-    queue_name,
-    status,
-    input,
-    attempt,
-    max_attempts,
-    original_attempt_id,
-    previous_attempt_id,
-    -- TODO: use duration once supported in Squirrel
-    extract(epoch from retry_delay)::int as retry_delay,
-    unique_key;
-"
-  |> pog.query
-  |> pog.parameter(
-    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_1),
-  )
-  |> pog.parameter(pog.float(arg_2))
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
