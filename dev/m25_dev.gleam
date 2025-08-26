@@ -4,6 +4,7 @@ import gleam/io
 import gleam/json
 import gleam/option
 import gleam/result
+import gleam/time/duration
 import m25
 import pog
 
@@ -84,10 +85,10 @@ pub fn main() -> Nil {
   let success_job = m25.new_job(JobInput("Success!"))
   let fail_job =
     m25.new_job(JobInput("Fail!"))
-    |> m25.retry(3, option.Some(3000))
+    |> m25.retry(3, option.Some(duration.seconds(3)))
   let crash_job =
     m25.new_job(JobInput("Crash!"))
-    |> m25.retry(3, option.Some(3000))
+    |> m25.retry(3, option.Some(duration.seconds(3)))
   let long_job = m25.new_job(JobInput("Long!"))
 
   let assert Ok(_) = m25.enqueue(conn, success_queue, success_job)

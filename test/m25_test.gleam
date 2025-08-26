@@ -9,6 +9,7 @@ import gleeunit
 import m25
 import m25/internal/cli
 import pog
+import tempo/duration
 import youid/uuid
 
 pub fn main() -> Nil {
@@ -206,7 +207,7 @@ pub fn failing_job_retries_test() {
       reserved_timeout: 5000,
     )
 
-  let job = m25.new_job("X") |> m25.retry(3, option.Some(1000))
+  let job = m25.new_job("X") |> m25.retry(3, option.Some(duration.seconds(1)))
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
   let assert Ok(enq) = m25.enqueue(conn, queue, job)
   let assert [row] = enq.rows
@@ -247,7 +248,9 @@ pub fn crash_job_retries_test() {
       reserved_timeout: 5000,
     )
 
-  let job = m25.new_job("X") |> m25.retry(2, option.Some(500))
+  let job =
+    m25.new_job("X")
+    |> m25.retry(max_attempts: 2, delay: option.Some(duration.milliseconds(1)))
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
   let assert Ok(enq) = m25.enqueue(conn, queue, job)
   let assert [row] = enq.rows

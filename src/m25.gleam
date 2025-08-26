@@ -12,6 +12,7 @@ import gleam/otp/static_supervisor as sup
 import gleam/otp/supervision
 import gleam/result
 import gleam/string
+import gleam/time/duration
 import gleam/time/timestamp
 import logging
 import m25/internal/bimap
@@ -21,6 +22,7 @@ import m25/internal/sql_ext
 import pog
 import youid/uuid
 
+@internal
 pub fn main() {
   cli.run_cli()
 }
@@ -32,12 +34,20 @@ pub fn main() {
 /// and does not apply to the cluster as a whole.
 pub type Queue(input, output, error) {
   Queue(
+    /// The name of the queue. This should be unique.
     name: String,
+    /// The maximum number of jobs that can be running at once.
+    /// Note: this is per application, not per cluster.
     max_concurrency: Int,
-    input_decoder: decode.Decoder(input),
+    /// A function to encode the input to JSON for input into the database.
     input_to_json: fn(input) -> json.Json,
+    /// A decoder to decode the JSON stored in the database.
+    input_decoder: decode.Decoder(input),
+    /// A function to encode the successful output of the job to JSON for input into the database.
     output_to_json: fn(output) -> json.Json,
+    /// A function to encode the error of the job to JSON for input into the database.
     error_to_json: fn(error) -> json.Json,
+    /// The handler function to process the job.
     handler_function: fn(input) -> Result(output, error),
     /// How long a job may run in milliseconds before it is considered failed.
     job_timeout: Int,
@@ -66,6 +76,24 @@ pub opaque type M25 {
   )
 }
 
+/// Create a new M25 instance. It's recommended that you use a supervised `pog`
+/// connection.
+///
+/// ```gleam
+/// let conn_name = process.new_name("db_connection")
+///
+/// let conn_child =
+///   pog.default_config(conn_name)
+///   |> pog.host("localhost")
+///   |> pog.database("my_database")
+///   |> pog.pool_size(15)
+///   |> pog.supervised
+///
+/// // Create a connection that can be accessed by our queue handlers
+/// let conn = pog.named_connection(conn_name)
+///
+/// let m25 = m25.new(conn)
+/// ```
 pub fn new(conn: pog.Connection) -> M25 {
   M25(conn:, queues: [])
 }
@@ -77,7 +105,7 @@ pub fn new(conn: pog.Connection) -> M25 {
 ///
 /// ```gleam
 /// pub fn main() {
-///   let assert Ok(m25) = m25.new(config)
+///   let assert Ok(m25) = m25.new(conn)
 ///     |> m25.add_queue(queue1)
 ///     |> result.try(m25.add_queue(_, queue2))
 ///     |> result.try(m25.add_queue(_, queue3))
@@ -137,16 +165,19 @@ fn supervisor_spec(m25: M25, queue_init_timeout: Int) {
 
 // ----- Jobs ------ //
 
+/// A background job to be executed.
 pub opaque type Job(input) {
   Job(
     input: input,
     scheduled_at: option.Option(timestamp.Timestamp),
     max_attempts: Int,
-    retry_delay: option.Option(Int),
+    retry_delay: option.Option(duration.Duration),
     unique_key: option.Option(String),
   )
 }
 
+/// Create a new job with default values and the given input. The input must match the
+/// input type of the queue you'll be enqueuing it to.
 pub fn new_job(input: input) -> Job(input) {
   Job(
     input:,
@@ -157,19 +188,26 @@ pub fn new_job(input: input) -> Job(input) {
   )
 }
 
-pub fn scheduled(job, scheduled_at) {
+/// Schedule a job to be executed at a specific time. If that time is in the past, the
+/// job will be executed immediately.
+pub fn schedule(job, at scheduled_at) {
   Job(..job, scheduled_at: option.Some(scheduled_at))
 }
 
-pub fn retry(job, max_attempts, retry_delay) {
+/// Configure retry behavior for a job. If no retry delay is provided, the job will be
+/// retried immediately.
+pub fn retry(job, max_attempts max_attempts, delay retry_delay) {
   Job(..job, max_attempts:, retry_delay:)
 }
 
-pub fn unique_key(job, unique_key) {
+/// Set a unique key for a job. This will prevent the job being enqueued if it already
+/// exists in a non-errored state. If the only matching attempts have failed or
+/// crashed, the job can still be enqueued.
+pub fn unique_key(job, key unique_key) {
   Job(..job, unique_key: option.Some(unique_key))
 }
 
-/// Queue a job to be executed as soon as a worker is available.
+/// Enqueue a job to be executed as soon as a worker is available.
 pub fn enqueue(conn, queue: Queue(input, output, error), job: Job(input)) {
   insert_job(
     conn,
@@ -180,10 +218,8 @@ pub fn enqueue(conn, queue: Queue(input, output, error), job: Job(input)) {
     job.max_attempts,
     option.None,
     option.None,
-    option.unwrap(job.retry_delay, 0)
-      |> int.to_float
-      |> float.divide(1000.0)
-      |> result.unwrap(0.0),
+    option.map(job.retry_delay, duration_to_milliseconds)
+      |> option.unwrap(0.0),
     job.unique_key,
   )
 }
@@ -1031,4 +1067,9 @@ fn do_retry_exponential(
       }
     }
   }
+}
+
+fn duration_to_milliseconds(duration: duration.Duration) -> Float {
+  let #(seconds, nanoseconds) = duration.to_seconds_and_nanoseconds(duration)
+  int.to_float(seconds) *. 1000.0 +. int.to_float(nanoseconds) /. 1_000_000.0
 }
