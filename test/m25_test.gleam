@@ -4,6 +4,7 @@ import gleam/json
 import gleam/option
 import gleam/result
 import gleam/string
+import gleam/time/timestamp
 import gleeunit
 import m25
 import m25/internal/cli
@@ -21,13 +22,17 @@ fn with_test_db(run: fn(pog.Connection) -> a) {
     pog.url_config(pool, "postgres://postgres:postgres@localhost:5432/postgres")
   let assert Ok(started) = pog.start(config)
   let conn = started.data
-  let result =
-    pog.transaction(conn, fn(tx) {
-      run(tx)
-      |> Ok
-    })
+  let now = timestamp.system_time()
+  let result = run(conn)
+
+  let assert Ok(_) =
+    pog.query("delete from m25.job where created_at > $1")
+    |> pog.parameter(pog.timestamp(now))
+    |> pog.execute(conn)
+
   process.send_exit(started.pid)
-  let assert Ok(_) = result |> echo
+
+  result
 }
 
 fn wait_until(message: String, timeout_ms: Int, check: fn() -> Bool) {
@@ -138,7 +143,7 @@ pub fn success_job_flow_test() {
   let assert [row] = enqueued.rows
   let job_id = uuid.to_string(row.id)
 
-  let assert Ok(_) = m25.start(app, 5000)
+  let assert Ok(started) = m25.start(app, 5000)
 
   wait_until("job succeeds", 1000, fn() {
     case job_status(conn, job_id) {
@@ -146,6 +151,8 @@ pub fn success_job_flow_test() {
       _ -> False
     }
   })
+
+  process.send_exit(started.pid)
 }
 
 pub fn unique_key_conflict_test() {
@@ -205,7 +212,7 @@ pub fn failing_job_retries_test() {
   let assert [row] = enq.rows
   let original_id = uuid.to_string(row.id)
 
-  let assert Ok(_) = m25.start(app, 5000)
+  let assert Ok(started) = m25.start(app, 5000)
 
   wait_until("3 attempts appear", 10_000, fn() {
     case chain_completed_attempt_count(conn, original_id) {
@@ -216,6 +223,8 @@ pub fn failing_job_retries_test() {
 
   let assert Ok(3) = chain_completed_attempt_count(conn, original_id)
   let assert Ok(option.Some("error")) = last_failure_reason(conn, original_id)
+
+  process.send_exit(started.pid)
 }
 
 pub fn crash_job_retries_test() {
@@ -244,7 +253,7 @@ pub fn crash_job_retries_test() {
   let assert [row] = enq.rows
   let original_id = uuid.to_string(row.id)
 
-  let assert Ok(_) = m25.start(app, 5000)
+  let assert Ok(started) = m25.start(app, 5000)
 
   wait_until("2 attempts appear", 10_000, fn() {
     case chain_completed_attempt_count(conn, original_id) {
@@ -254,6 +263,8 @@ pub fn crash_job_retries_test() {
   })
 
   let assert Ok(option.Some("crash")) = last_failure_reason(conn, original_id)
+
+  process.send_exit(started.pid)
 }
 
 pub fn job_timeout_test() {
@@ -284,7 +295,7 @@ pub fn job_timeout_test() {
   let assert [row] = enq.rows
   let original_id = uuid.to_string(row.id)
 
-  let assert Ok(_) = m25.start(app, 5000)
+  let assert Ok(started) = m25.start(app, 5000)
 
   wait_until("job times out", 10_000, fn() {
     case last_failure_reason(conn, original_id) {
@@ -292,6 +303,8 @@ pub fn job_timeout_test() {
       _ -> False
     }
   })
+
+  process.send_exit(started.pid)
 }
 
 fn executing_count(
@@ -365,7 +378,7 @@ pub fn heartbeat_timeout_test() {
   let assert [row] = enq.rows
   let original_id = uuid.to_string(row.id)
 
-  let assert Ok(_) = m25.start(app, 5000)
+  let assert Ok(started) = m25.start(app, 5000)
 
   wait_until("final failure reason=heartbeat_timeout", 10_000, fn() {
     case last_failure_reason(conn, original_id) {
@@ -373,6 +386,8 @@ pub fn heartbeat_timeout_test() {
       _ -> False
     }
   })
+
+  process.send_exit(started.pid)
 }
 
 pub fn max_concurrency_cap_test() {
@@ -406,7 +421,7 @@ pub fn max_concurrency_cap_test() {
   let assert Ok(_) = m25.enqueue(conn, queue, job)
   let assert Ok(_) = m25.enqueue(conn, queue, job)
 
-  let assert Ok(_) = m25.start(app, 5000)
+  let assert Ok(started) = m25.start(app, 5000)
 
   // Wait until at least one job is executing, then sample for 2 seconds
   wait_until("some executing", 5000, fn() {
@@ -416,7 +431,9 @@ pub fn max_concurrency_cap_test() {
     }
   })
   let assert Ok(max_seen) = sample_max_executing(conn, queue.name, 2000, 0)
-  let assert True = max_seen <= 2
+  assert max_seen <= 2
+
+  process.send_exit(started.pid)
 }
 
 pub fn deadline_started_at_test() {
@@ -447,7 +464,7 @@ pub fn deadline_started_at_test() {
   let assert [row] = enq.rows
   let job_id = uuid.to_string(row.id)
 
-  let assert Ok(_) = m25.start(app, 5000)
+  let assert Ok(started) = m25.start(app, 5000)
 
   // Wait for executing status
   wait_until("job executing", 5000, fn() {
@@ -472,7 +489,9 @@ pub fn deadline_started_at_test() {
 
   let assert Ok(res) = query_result
   let assert [seconds] = res.rows
-  let assert True = seconds == 5
+  assert seconds == 5
+
+  process.send_exit(started.pid)
 }
 
 fn uuid() -> String {
