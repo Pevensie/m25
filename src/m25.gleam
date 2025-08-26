@@ -218,7 +218,7 @@ pub fn enqueue(conn, queue: Queue(input, output, error), job: Job(input)) {
     job.max_attempts,
     option.None,
     option.None,
-    option.map(job.retry_delay, duration_to_milliseconds)
+    option.map(job.retry_delay, duration_to_seconds)
       |> option.unwrap(0.0),
     job.unique_key,
   )
@@ -1069,7 +1069,9 @@ fn do_retry_exponential(
   }
 }
 
-fn duration_to_milliseconds(duration: duration.Duration) -> Float {
+fn duration_to_seconds(duration: duration.Duration) -> Float {
   let #(seconds, nanoseconds) = duration.to_seconds_and_nanoseconds(duration)
-  int.to_float(seconds) *. 1000.0 +. int.to_float(nanoseconds) /. 1_000_000.0
+  int.to_float(seconds)
+  +. int.to_float(nanoseconds)
+  /. int.to_float(1_000_000_000)
 }
