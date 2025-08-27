@@ -13,10 +13,23 @@ where id in (
 )
 returning
     id,
-    status,
+    queue_name,
+    created_at::timestamp,
+    scheduled_at::timestamp,
     input,
+    reserved_at::timestamp,
+    started_at::timestamp,
+    cancelled_at::timestamp,
+    finished_at::timestamp,
+    status,
+    output,
+    deadline::timestamp,
+    latest_heartbeat_at::timestamp,
+    failure_reason,
+    error_data,
     attempt,
     max_attempts,
     original_attempt_id,
     previous_attempt_id,
-    extract(epoch from retry_delay)::int as retry_delay;
+    extract(epoch from retry_delay)::int as retry_delay,
+    unique_key;

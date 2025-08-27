@@ -66,6 +66,15 @@ Further documentation can be found at <https://hexdocs.pm/m25>. You will also fi
 runnable example in [`dev/m25_dev.gleam`](./dev/m25_dev.gleam). This will run against
 the Postgres database configured in the [`compose.yml`](./compose.yml) file.
 
+## Delivery Semantics
+
+M25 aims to deliver jobs at least once. If a job fails, either by returning an error,
+crashing, timing out, or failing to respond to heartbeats, M25 will mark the job as
+failed and retry according to the configured retry policy.
+
+Jobs that are stuck in an executing state will be cleaned up after a configurable
+timeout, and can be retried.
+
 ## Tables
 
 This driver creates tables in the `m25` schema to store jobs.

@@ -41,12 +41,16 @@ pub type Queue(input, output, error) {
     max_concurrency: Int,
     /// A function to encode the input to JSON for input into the database.
     input_to_json: fn(input) -> json.Json,
-    /// A decoder to decode the JSON stored in the database.
+    /// A decoder to decode the JSON for the job input stored in the database.
     input_decoder: decode.Decoder(input),
     /// A function to encode the successful output of the job to JSON for input into the database.
     output_to_json: fn(output) -> json.Json,
+    /// A decoder to decode the JSON for the job output stored in the database.
+    output_decoder: decode.Decoder(output),
     /// A function to encode the error of the job to JSON for input into the database.
     error_to_json: fn(error) -> json.Json,
+    /// A decoder to decode the JSON for the job error stored in the database.
+    error_decoder: decode.Decoder(error),
     /// The handler function to process the job.
     handler_function: fn(input) -> Result(output, error),
     /// How long a job may run in milliseconds before it is considered failed.
@@ -240,7 +244,7 @@ pub fn enqueue(conn, queue: Queue(input, output, error), job: Job(input)) {
 //             |        |        |
 //                  ...Workers (monitored by executor actor)
 
-type JobStatus {
+pub type JobStatus {
   Pending
   Reserved
   Executing
@@ -261,7 +265,7 @@ fn job_status_from_string(maybe_status: String) -> Result(JobStatus, Nil) {
   }
 }
 
-type FailureReason {
+pub type FailureReason {
   Errored
   HeartbeatTimeout
   JobTimeout
@@ -277,28 +281,74 @@ fn failure_reason_to_string(failure_reason) {
   }
 }
 
+fn failure_reason_from_string(reason: String) -> Result(FailureReason, Nil) {
+  case reason {
+    "error" -> Ok(Errored)
+    "crash" -> Ok(Crash)
+    "heartbeat_timeout" -> Ok(HeartbeatTimeout)
+    "job_timeout" -> Ok(JobTimeout)
+    _ -> Error(Nil)
+  }
+}
+
 // ----- SQL wrappers ----- //
 
-type JobId {
+pub type JobId {
   JobId(value: uuid.Uuid)
 }
 
-type ExecutableJob(input, output, error) {
-  ExecutableJob(
+pub type JobRecord(input, output, error) {
+  JobRecord(
     id: JobId,
-    status: JobStatus,
+    queue_name: String,
+    created_at: timestamp.Timestamp,
+    scheduled_at: option.Option(timestamp.Timestamp),
     input: input,
+    reserved_at: option.Option(timestamp.Timestamp),
+    started_at: option.Option(timestamp.Timestamp),
+    cancelled_at: option.Option(timestamp.Timestamp),
+    finished_at: option.Option(timestamp.Timestamp),
+    status: JobStatus,
+    output: option.Option(output),
+    deadline: option.Option(timestamp.Timestamp),
+    latest_heartbeat_at: option.Option(timestamp.Timestamp),
+    failure_reason: option.Option(FailureReason),
+    error_data: option.Option(error),
     attempt: Int,
     max_attempts: Int,
     original_attempt_id: option.Option(JobId),
     previous_attempt_id: option.Option(JobId),
     retry_delay_seconds: Int,
+    unique_key: option.Option(String),
   )
 }
 
-type ExecutableJobFetchError {
-  ExecutableJobFetchQueryError(pog.QueryError)
-  ExecutableJobFetchDecodeError(json.DecodeError)
+type JobRecordDecodeError {
+  JobRecordFetchInvalidStatusError(JobId, String)
+  JobRecordFetchInvalidFailureReason(JobId, String)
+  JobRecordFetchJsonDecodeError(JobId, json.DecodeError)
+}
+
+type JobRecordFetchError {
+  JobRecordFetchQueryError(pog.QueryError)
+  JobRecordFetchDecodeErrors(List(JobRecordDecodeError))
+}
+
+fn job_record_decode_error_to_string(error: JobRecordDecodeError) -> String {
+  case error {
+    JobRecordFetchInvalidStatusError(job_id, status) ->
+      "Job " <> uuid.to_string(job_id.value) <> " has invalid status " <> status
+    JobRecordFetchInvalidFailureReason(job_id, reason) ->
+      "Invalid failure reason for job "
+      <> uuid.to_string(job_id.value)
+      <> ": "
+      <> reason
+    JobRecordFetchJsonDecodeError(job_id, error) ->
+      "Failed to decode job "
+      <> uuid.to_string(job_id.value)
+      <> ": "
+      <> string.inspect(error)
+  }
 }
 
 fn succeed_job(conn: pog.Connection, job_id: JobId, output: json.Json) {
@@ -319,40 +369,92 @@ fn reserve_jobs(
   limit: Int,
 ) {
   use jobs <- result.try(
-    sql.reserve_jobs(conn, queue.name, limit)
-    |> result.map_error(ExecutableJobFetchQueryError),
+    sql_ext.reserve_jobs(conn, queue.name, limit)
+    |> result.map_error(JobRecordFetchQueryError),
   )
 
-  jobs.rows
-  |> list.filter_map(fn(job) {
-    case job_status_from_string(job.status) {
-      Ok(status) -> {
-        let job_id = JobId(value: job.id)
-        job.input
-        |> json.parse(queue.input_decoder)
-        |> result.map(ExecutableJob(
-          id: job_id,
-          status:,
-          input: _,
-          attempt: job.attempt,
-          max_attempts: job.max_attempts,
-          original_attempt_id: option.map(job.original_attempt_id, JobId),
-          previous_attempt_id: option.map(job.previous_attempt_id, JobId),
-          retry_delay_seconds: job.retry_delay,
-        ))
-        |> Ok
+  let #(valid_jobs, invalid_jobs) =
+    jobs.rows
+    |> list.map(fn(job) {
+      let job_id = JobId(job.id)
+      use status <- result.try(
+        job_status_from_string(job.status)
+        |> result.replace_error(JobRecordFetchInvalidStatusError(
+          job_id,
+          job.status,
+        )),
+      )
+      use input <- result.try(
+        json.parse(job.input, queue.input_decoder)
+        |> result.map_error(JobRecordFetchJsonDecodeError(job_id, _)),
+      )
+
+      let output_result = case job.output {
+        option.None -> Ok(option.None)
+        option.Some(output) -> {
+          json.parse(output, queue.output_decoder)
+          |> result.map(option.Some)
+          |> result.map_error(JobRecordFetchJsonDecodeError(job_id, _))
+        }
       }
-      Error(_) -> {
-        logging.log(
-          logging.Error,
-          "Invalid job status \"" <> job.status <> "\", skipping job",
-        )
-        Error(Nil)
+      use output <- result.try(output_result)
+
+      let error_result = case job.error_data {
+        option.None -> Ok(option.None)
+        option.Some(error) -> {
+          json.parse(error, queue.error_decoder)
+          |> result.map(option.Some)
+          |> result.map_error(JobRecordFetchJsonDecodeError(job_id, _))
+        }
       }
-    }
-  })
-  |> result.all
-  |> result.map_error(ExecutableJobFetchDecodeError)
+      use error_data <- result.try(error_result)
+
+      let failure_reason_result = case job.failure_reason {
+        option.None -> Ok(option.None)
+        option.Some(reason) -> {
+          failure_reason_from_string(reason)
+          |> result.map(option.Some)
+          |> result.replace_error(JobRecordFetchInvalidFailureReason(
+            job_id,
+            reason,
+          ))
+        }
+      }
+      use failure_reason <- result.try(failure_reason_result)
+
+      JobRecord(
+        id: job_id,
+        queue_name: job.queue_name,
+        created_at: job.created_at,
+        scheduled_at: job.scheduled_at,
+        input:,
+        reserved_at: job.reserved_at,
+        started_at: job.started_at,
+        cancelled_at: job.cancelled_at,
+        finished_at: job.finished_at,
+        status:,
+        output:,
+        deadline: job.deadline,
+        latest_heartbeat_at: job.latest_heartbeat_at,
+        failure_reason:,
+        error_data:,
+        attempt: job.attempt,
+        max_attempts: job.max_attempts,
+        original_attempt_id: option.map(job.original_attempt_id, JobId),
+        previous_attempt_id: option.map(job.previous_attempt_id, JobId),
+        retry_delay_seconds: job.retry_delay,
+        unique_key: job.unique_key,
+      )
+      |> Ok
+    })
+    |> result.partition
+  // |> result.all
+  // |> result.map_error(JobRecordFetchDecodeError)
+
+  case invalid_jobs {
+    [] -> Ok(valid_jobs)
+    invalid -> Error(JobRecordFetchDecodeErrors(invalid))
+  }
 }
 
 fn finalize_job_reservations(
@@ -531,7 +633,7 @@ fn queue_manager_spec(
 
 type ProcessJobsError {
   ProcessJobsQueryError(when: String, error: pog.QueryError)
-  ProcessJobsFetchError(ExecutableJobFetchError)
+  ProcessJobsFetchError(JobRecordFetchError)
 }
 
 fn handle_queue_message(
@@ -716,7 +818,7 @@ fn handle_queue_message(
               )
             pog.TransactionRolledBack(ProcessJobsFetchError(fetch_error)) ->
               case fetch_error {
-                ExecutableJobFetchQueryError(query_error) ->
+                JobRecordFetchQueryError(query_error) ->
                   logging.log(
                     logging.Error,
                     "Query error when reserving jobs for queue "
@@ -724,13 +826,14 @@ fn handle_queue_message(
                       <> ": "
                       <> string.inspect(query_error),
                   )
-                ExecutableJobFetchDecodeError(decode_error) ->
+                JobRecordFetchDecodeErrors(decode_errors) ->
                   logging.log(
                     logging.Error,
-                    "Decode error when reserving jobs for queue "
-                      <> state.queue.name
-                      <> ": "
-                      <> string.inspect(decode_error),
+                    "Invalid data for multiple jobs: \n"
+                      <> {
+                      list.map(decode_errors, job_record_decode_error_to_string)
+                      |> string.join("\n")
+                    },
                   )
               }
           }

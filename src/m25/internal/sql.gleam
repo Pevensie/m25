@@ -7,6 +7,7 @@
 import gleam/dynamic/decode
 import gleam/json
 import gleam/option.{type Option}
+import gleam/time/timestamp.{type Timestamp}
 import pog
 import youid/uuid.{type Uuid}
 
@@ -250,15 +251,13 @@ select
     (select count(*) from failed_jobs) as failed_count;
 "
   |> pog.query
-  |> pog.parameter(pog.array(
-    fn(value) { pog.text(uuid.to_string(value)) },
-    arg_1,
-  ))
+  |> pog.parameter(
+    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_1),
+  )
   |> pog.parameter(pog.float(arg_2))
-  |> pog.parameter(pog.array(
-    fn(value) { pog.text(uuid.to_string(value)) },
-    arg_3,
-  ))
+  |> pog.parameter(
+    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_3),
+  )
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
@@ -346,7 +345,8 @@ pub fn insert_job(
   arg_9,
   arg_10,
 ) {
-  let decoder = {
+  let decoder =
+  {
     use id <- decode.field(0, uuid_decoder())
     use status <- decode.field(1, decode.string)
     use input <- decode.field(2, decode.string)
@@ -424,13 +424,26 @@ pub fn insert_job(
 pub type ReserveJobsRow {
   ReserveJobsRow(
     id: Uuid,
-    status: String,
+    queue_name: String,
+    created_at: Timestamp,
+    scheduled_at: Timestamp,
     input: String,
+    reserved_at: Timestamp,
+    started_at: Timestamp,
+    cancelled_at: Timestamp,
+    finished_at: Timestamp,
+    status: String,
+    output: Option(String),
+    deadline: Timestamp,
+    latest_heartbeat_at: Timestamp,
+    failure_reason: Option(String),
+    error_data: Option(String),
     attempt: Int,
     max_attempts: Int,
     original_attempt_id: Option(Uuid),
     previous_attempt_id: Option(Uuid),
     retry_delay: Int,
+    unique_key: Option(String),
   )
 }
 
@@ -443,22 +456,48 @@ pub type ReserveJobsRow {
 pub fn reserve_jobs(db, arg_1, arg_2) {
   let decoder = {
     use id <- decode.field(0, uuid_decoder())
-    use status <- decode.field(1, decode.string)
-    use input <- decode.field(2, decode.string)
-    use attempt <- decode.field(3, decode.int)
-    use max_attempts <- decode.field(4, decode.int)
-    use original_attempt_id <- decode.field(5, decode.optional(uuid_decoder()))
-    use previous_attempt_id <- decode.field(6, decode.optional(uuid_decoder()))
-    use retry_delay <- decode.field(7, decode.int)
+    use queue_name <- decode.field(1, decode.string)
+    use created_at <- decode.field(2, pog.timestamp_decoder())
+    use scheduled_at <- decode.field(3, pog.timestamp_decoder())
+    use input <- decode.field(4, decode.string)
+    use reserved_at <- decode.field(5, pog.timestamp_decoder())
+    use started_at <- decode.field(6, pog.timestamp_decoder())
+    use cancelled_at <- decode.field(7, pog.timestamp_decoder())
+    use finished_at <- decode.field(8, pog.timestamp_decoder())
+    use status <- decode.field(9, decode.string)
+    use output <- decode.field(10, decode.optional(decode.string))
+    use deadline <- decode.field(11, pog.timestamp_decoder())
+    use latest_heartbeat_at <- decode.field(12, pog.timestamp_decoder())
+    use failure_reason <- decode.field(13, decode.optional(decode.string))
+    use error_data <- decode.field(14, decode.optional(decode.string))
+    use attempt <- decode.field(15, decode.int)
+    use max_attempts <- decode.field(16, decode.int)
+    use original_attempt_id <- decode.field(17, decode.optional(uuid_decoder()))
+    use previous_attempt_id <- decode.field(18, decode.optional(uuid_decoder()))
+    use retry_delay <- decode.field(19, decode.int)
+    use unique_key <- decode.field(20, decode.optional(decode.string))
     decode.success(ReserveJobsRow(
       id:,
-      status:,
+      queue_name:,
+      created_at:,
+      scheduled_at:,
       input:,
+      reserved_at:,
+      started_at:,
+      cancelled_at:,
+      finished_at:,
+      status:,
+      output:,
+      deadline:,
+      latest_heartbeat_at:,
+      failure_reason:,
+      error_data:,
       attempt:,
       max_attempts:,
       original_attempt_id:,
       previous_attempt_id:,
       retry_delay:,
+      unique_key:,
     ))
   }
 
@@ -477,13 +516,27 @@ where id in (
 )
 returning
     id,
-    status,
+    queue_name,
+    created_at::timestamp,
+    scheduled_at::timestamp,
     input,
+    reserved_at::timestamp,
+    started_at::timestamp,
+    cancelled_at::timestamp,
+    finished_at::timestamp,
+    status,
+    output,
+    deadline::timestamp,
+    latest_heartbeat_at::timestamp,
+    failure_reason,
+    error_data,
     attempt,
     max_attempts,
     original_attempt_id,
     previous_attempt_id,
-    extract(epoch from retry_delay)::int as retry_delay;"
+    extract(epoch from retry_delay)::int as retry_delay,
+    unique_key;
+"
   |> pog.query
   |> pog.parameter(pog.text(arg_1))
   |> pog.parameter(pog.int(arg_2))
@@ -527,10 +580,9 @@ pub fn retry_if_needed(db, arg_1) {
 );
 "
   |> pog.query
-  |> pog.parameter(pog.array(
-    fn(value) { pog.text(uuid.to_string(value)) },
-    arg_1,
-  ))
+  |> pog.parameter(
+    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_1),
+  )
   |> pog.returning(decoder)
   |> pog.execute(db)
 }

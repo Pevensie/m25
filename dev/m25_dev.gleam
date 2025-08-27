@@ -38,10 +38,12 @@ pub fn main() -> Nil {
     m25.Queue(
       name: "success-queue",
       max_concurrency: 10,
-      input_decoder: job_input_decoder(),
       input_to_json: job_input_to_json,
+      input_decoder: job_input_decoder(),
       output_to_json: json.string,
+      output_decoder: decode.string,
       error_to_json: json.string,
+      error_decoder: decode.string,
       handler_function: fn(input) {
         io.println("Running job with input: " <> input.value)
         Ok("Ok")

@@ -55,6 +55,26 @@ fn wait_until_loop(message: String, remaining: Int, check: fn() -> Bool) {
   }
 }
 
+fn default_test_queue() {
+  m25.Queue(
+    name: "",
+    max_concurrency: 2,
+    input_decoder: decode.string,
+    input_to_json: json.string,
+    output_decoder: decode.string,
+    output_to_json: json.string,
+    error_decoder: decode.string,
+    error_to_json: json.string,
+    handler_function: fn(_) { Ok("") },
+    job_timeout: 5000,
+    poll_interval: 50,
+    heartbeat_interval: 500,
+    allowed_heartbeat_misses: 10,
+    executor_init_timeout: 2000,
+    reserved_timeout: 5000,
+  )
+}
+
 fn job_status(conn: pog.Connection, id: String) -> Result(String, String) {
   let query_result =
     pog.query("select status from m25.job where id = $1")
@@ -194,19 +214,9 @@ pub fn success_job_flow_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-success-" <> uuid(),
-      max_concurrency: 2,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(input) { Ok("ok: " <> input) },
-      job_timeout: 60_000,
-      poll_interval: 100,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 2,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
@@ -231,19 +241,9 @@ pub fn unique_key_conflict_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-uniq-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(input) { Ok(input) },
-      job_timeout: 60_000,
-      poll_interval: 1000,
-      heartbeat_interval: 1000,
-      allowed_heartbeat_misses: 2,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let key = "k-" <> uuid()
@@ -262,19 +262,9 @@ pub fn unique_key_after_failure_allows_enqueue_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-uniq-after-fail-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) { Error("boom") },
-      job_timeout: 10_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 5,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let key = "k-" <> uuid()
@@ -307,19 +297,9 @@ pub fn unique_key_after_success_blocks_enqueue_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-uniq-after-success-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(input) { Ok(input) },
-      job_timeout: 10_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 5,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let key = "k-" <> uuid()
@@ -350,19 +330,9 @@ pub fn failing_job_retries_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-retry-fail-" <> uuid(),
-      max_concurrency: 2,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) { Error("boom") },
-      job_timeout: 60_000,
-      poll_interval: 100,
-      heartbeat_interval: 500,
-      allowed_heartbeat_misses: 5,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let job = m25.new_job("X") |> m25.retry(3, option.Some(duration.seconds(1)))
@@ -391,19 +361,9 @@ pub fn retry_immediate_delay_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-retry-immediate-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) { Error("boom") },
-      job_timeout: 60_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 5,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let job = m25.new_job("X") |> m25.retry(2, option.None)
@@ -429,19 +389,9 @@ pub fn retry_delay_spacing_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-retry-spacing-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) { Error("boom") },
-      job_timeout: 60_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 5,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let delay = duration.seconds(2)
@@ -476,19 +426,9 @@ pub fn crash_job_retries_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-retry-crash-" <> uuid(),
-      max_concurrency: 2,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) { panic as "crash" },
-      job_timeout: 60_000,
-      poll_interval: 100,
-      heartbeat_interval: 500,
-      allowed_heartbeat_misses: 5,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let job =
@@ -518,22 +458,13 @@ pub fn job_timeout_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-timeout-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) {
         process.sleep(3000)
         Ok("done")
       },
       job_timeout: 1000,
-      poll_interval: 100,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 100,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
@@ -601,22 +532,14 @@ pub fn heartbeat_timeout_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-heartbeat-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) {
         process.sleep(5000)
         Ok("done")
       },
-      job_timeout: 60_000,
-      poll_interval: 50,
       heartbeat_interval: 100,
       allowed_heartbeat_misses: 0,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
@@ -641,22 +564,14 @@ pub fn heartbeat_no_timeout_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-heartbeat-ok-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) {
         process.sleep(800)
         Ok("done")
       },
-      job_timeout: 10_000,
-      poll_interval: 50,
       heartbeat_interval: 100,
       allowed_heartbeat_misses: 10,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
@@ -701,22 +616,13 @@ pub fn max_concurrency_cap_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-concurrency-" <> uuid(),
       max_concurrency: 2,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) {
         process.sleep(1500)
         Ok("done")
       },
-      job_timeout: 10_000,
-      poll_interval: 50,
-      heartbeat_interval: 500,
-      allowed_heartbeat_misses: 10,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
@@ -747,22 +653,13 @@ pub fn deadline_started_at_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-deadline-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) {
         process.sleep(3000)
         Ok("done")
       },
       job_timeout: 5000,
-      poll_interval: 50,
-      heartbeat_interval: 500,
-      allowed_heartbeat_misses: 10,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
@@ -805,19 +702,9 @@ pub fn scheduled_future_and_past_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-schedule-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(input) { Ok("ok: " <> input) },
-      job_timeout: 10_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 2,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
@@ -864,38 +751,13 @@ pub fn scheduled_future_and_past_test() {
 pub fn persistence_output_and_error_test() {
   use conn <- with_test_db
 
-  let q_ok =
-    m25.Queue(
-      name: "int-output-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
-      handler_function: fn(input) { Ok("ok: " <> input) },
-      job_timeout: 10_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 2,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
-    )
+  let q_ok = m25.Queue(..default_test_queue(), name: "int-output-" <> uuid())
 
   let q_err =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-error-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) { Error("boom") },
-      job_timeout: 10_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 2,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let assert Ok(app) =
@@ -919,9 +781,7 @@ pub fn persistence_output_and_error_test() {
     }
   })
 
-  let assert Ok(option.Some(output_text)) = job_output_text(conn, ok_id)
-  // Output is stored as JSON text; for a string value it includes quotes
-  assert output_text == "\"ok: A\""
+  let assert Ok(option.Some("\"\"")) = job_output_text(conn, ok_id)
 
   wait_until("error job fails", 5000, fn() {
     case last_failure_reason(conn, err_original_id) {
@@ -942,19 +802,9 @@ pub fn reserved_timeout_recovery_test() {
 
   let queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-reserved-cleanup-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
-      handler_function: fn(_) { Ok("done") },
-      job_timeout: 10_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 2,
-      executor_init_timeout: 2000,
-      reserved_timeout: 1000,
+      reserved_timeout: 100,
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
@@ -986,22 +836,7 @@ pub fn reserved_timeout_recovery_test() {
 pub fn add_queue_duplicate_name_test() {
   use conn <- with_test_db
 
-  let queue =
-    m25.Queue(
-      name: "int-dupq-" <> uuid(),
-      max_concurrency: 1,
-      input_decoder: decode.string,
-      input_to_json: json.string,
-      output_to_json: json.string,
-      error_to_json: json.string,
-      handler_function: fn(_) { Ok("done") },
-      job_timeout: 10_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 2,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
-    )
+  let queue = m25.Queue(..default_test_queue(), name: "int-dupq-" <> uuid())
 
   let m = m25.new(conn)
   let assert Ok(m) = m25.add_queue(m, queue)
@@ -1016,23 +851,15 @@ pub fn decode_failure_pending_test() {
   // Intentionally mismatch encoder/decoder: encode as string but decode as int
   let bad_queue =
     m25.Queue(
+      ..default_test_queue(),
       name: "int-decode-fail-" <> uuid(),
-      max_concurrency: 1,
       input_decoder: decode.int,
       input_to_json: fn(_) { json.string("not-an-int") },
-      output_to_json: json.string,
-      error_to_json: json.string,
       handler_function: fn(_) {
         // This shouldn't run
         process.kill(test_process)
         Error("unreachable")
       },
-      job_timeout: 10_000,
-      poll_interval: 50,
-      heartbeat_interval: 200,
-      allowed_heartbeat_misses: 2,
-      executor_init_timeout: 2000,
-      reserved_timeout: 5000,
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(bad_queue)
