@@ -251,13 +251,15 @@ select
     (select count(*) from failed_jobs) as failed_count;
 "
   |> pog.query
-  |> pog.parameter(
-    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_1),
-  )
+  |> pog.parameter(pog.array(
+    fn(value) { pog.text(uuid.to_string(value)) },
+    arg_1,
+  ))
   |> pog.parameter(pog.float(arg_2))
-  |> pog.parameter(
-    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_3),
-  )
+  |> pog.parameter(pog.array(
+    fn(value) { pog.text(uuid.to_string(value)) },
+    arg_3,
+  ))
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
@@ -474,8 +476,7 @@ pub fn insert_job(
   arg_9,
   arg_10,
 ) {
-  let decoder =
-  {
+  let decoder = {
     use id <- decode.field(0, uuid_decoder())
     use queue_name <- decode.field(1, decode.string)
     use created_at <- decode.field(2, pog.timestamp_decoder())
@@ -747,9 +748,10 @@ pub fn retry_if_needed(db, arg_1) {
 );
 "
   |> pog.query
-  |> pog.parameter(
-    pog.array(fn(value) { pog.text(uuid.to_string(value)) }, arg_1),
-  )
+  |> pog.parameter(pog.array(
+    fn(value) { pog.text(uuid.to_string(value)) },
+    arg_1,
+  ))
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
