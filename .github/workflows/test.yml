@@ -28,8 +28,9 @@ jobs:
           # elixir-version: "1"
       - run: gleam deps download
       - run: gleam run -m m25 migrate --apply
-      - run: gleam run -m squirrel check
-        env:
-          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
+      # TODO: Re-add this once Squirrel generates formatted SQL
+      # - run: gleam run -m squirrel check
+      #   env:
+      #     DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
       - run: gleam test
       - run: gleam format --check src test
