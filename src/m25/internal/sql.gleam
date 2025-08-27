@@ -262,6 +262,122 @@ select
   |> pog.execute(db)
 }
 
+/// A row you get from running the `get_job` query
+/// defined in `./src/m25/internal/sql/get_job.sql`.
+///
+/// > 🐿️ This type definition was generated automatically using v4.2.0 of the
+/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub type GetJobRow {
+  GetJobRow(
+    id: Uuid,
+    queue_name: String,
+    created_at: Timestamp,
+    scheduled_at: Timestamp,
+    input: String,
+    reserved_at: Timestamp,
+    started_at: Timestamp,
+    cancelled_at: Timestamp,
+    finished_at: Timestamp,
+    status: String,
+    output: Option(String),
+    deadline: Timestamp,
+    latest_heartbeat_at: Timestamp,
+    failure_reason: Option(String),
+    error_data: Option(String),
+    attempt: Int,
+    max_attempts: Int,
+    original_attempt_id: Option(Uuid),
+    previous_attempt_id: Option(Uuid),
+    retry_delay: Int,
+    unique_key: Option(String),
+  )
+}
+
+/// Runs the `get_job` query
+/// defined in `./src/m25/internal/sql/get_job.sql`.
+///
+/// > 🐿️ This function was generated automatically using v4.2.0 of
+/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub fn get_job(db, arg_1) {
+  let decoder = {
+    use id <- decode.field(0, uuid_decoder())
+    use queue_name <- decode.field(1, decode.string)
+    use created_at <- decode.field(2, pog.timestamp_decoder())
+    use scheduled_at <- decode.field(3, pog.timestamp_decoder())
+    use input <- decode.field(4, decode.string)
+    use reserved_at <- decode.field(5, pog.timestamp_decoder())
+    use started_at <- decode.field(6, pog.timestamp_decoder())
+    use cancelled_at <- decode.field(7, pog.timestamp_decoder())
+    use finished_at <- decode.field(8, pog.timestamp_decoder())
+    use status <- decode.field(9, decode.string)
+    use output <- decode.field(10, decode.optional(decode.string))
+    use deadline <- decode.field(11, pog.timestamp_decoder())
+    use latest_heartbeat_at <- decode.field(12, pog.timestamp_decoder())
+    use failure_reason <- decode.field(13, decode.optional(decode.string))
+    use error_data <- decode.field(14, decode.optional(decode.string))
+    use attempt <- decode.field(15, decode.int)
+    use max_attempts <- decode.field(16, decode.int)
+    use original_attempt_id <- decode.field(17, decode.optional(uuid_decoder()))
+    use previous_attempt_id <- decode.field(18, decode.optional(uuid_decoder()))
+    use retry_delay <- decode.field(19, decode.int)
+    use unique_key <- decode.field(20, decode.optional(decode.string))
+    decode.success(GetJobRow(
+      id:,
+      queue_name:,
+      created_at:,
+      scheduled_at:,
+      input:,
+      reserved_at:,
+      started_at:,
+      cancelled_at:,
+      finished_at:,
+      status:,
+      output:,
+      deadline:,
+      latest_heartbeat_at:,
+      failure_reason:,
+      error_data:,
+      attempt:,
+      max_attempts:,
+      original_attempt_id:,
+      previous_attempt_id:,
+      retry_delay:,
+      unique_key:,
+    ))
+  }
+
+  "select
+    id,
+    queue_name,
+    created_at::timestamp,
+    scheduled_at::timestamp,
+    input,
+    reserved_at::timestamp,
+    started_at::timestamp,
+    cancelled_at::timestamp,
+    finished_at::timestamp,
+    status,
+    output,
+    deadline::timestamp,
+    latest_heartbeat_at::timestamp,
+    failure_reason,
+    error_data,
+    attempt,
+    max_attempts,
+    original_attempt_id,
+    previous_attempt_id,
+    extract(epoch from retry_delay)::int as retry_delay,
+    unique_key
+from m25.job where id = $1;
+"
+  |> pog.query
+  |> pog.parameter(pog.text(uuid.to_string(arg_1)))
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
 /// A row you get from running the `heartbeat` query
 /// defined in `./src/m25/internal/sql/heartbeat.sql`.
 ///
@@ -316,13 +432,26 @@ returning
 pub type InsertJobRow {
   InsertJobRow(
     id: Uuid,
-    status: String,
+    queue_name: String,
+    created_at: Timestamp,
+    scheduled_at: Timestamp,
     input: String,
+    reserved_at: Timestamp,
+    started_at: Timestamp,
+    cancelled_at: Timestamp,
+    finished_at: Timestamp,
+    status: String,
+    output: Option(String),
+    deadline: Timestamp,
+    latest_heartbeat_at: Timestamp,
+    failure_reason: Option(String),
+    error_data: Option(String),
     attempt: Int,
     max_attempts: Int,
     original_attempt_id: Option(Uuid),
     previous_attempt_id: Option(Uuid),
     retry_delay: Int,
+    unique_key: Option(String),
   )
 }
 
@@ -348,22 +477,48 @@ pub fn insert_job(
   let decoder =
   {
     use id <- decode.field(0, uuid_decoder())
-    use status <- decode.field(1, decode.string)
-    use input <- decode.field(2, decode.string)
-    use attempt <- decode.field(3, decode.int)
-    use max_attempts <- decode.field(4, decode.int)
-    use original_attempt_id <- decode.field(5, decode.optional(uuid_decoder()))
-    use previous_attempt_id <- decode.field(6, decode.optional(uuid_decoder()))
-    use retry_delay <- decode.field(7, decode.int)
+    use queue_name <- decode.field(1, decode.string)
+    use created_at <- decode.field(2, pog.timestamp_decoder())
+    use scheduled_at <- decode.field(3, pog.timestamp_decoder())
+    use input <- decode.field(4, decode.string)
+    use reserved_at <- decode.field(5, pog.timestamp_decoder())
+    use started_at <- decode.field(6, pog.timestamp_decoder())
+    use cancelled_at <- decode.field(7, pog.timestamp_decoder())
+    use finished_at <- decode.field(8, pog.timestamp_decoder())
+    use status <- decode.field(9, decode.string)
+    use output <- decode.field(10, decode.optional(decode.string))
+    use deadline <- decode.field(11, pog.timestamp_decoder())
+    use latest_heartbeat_at <- decode.field(12, pog.timestamp_decoder())
+    use failure_reason <- decode.field(13, decode.optional(decode.string))
+    use error_data <- decode.field(14, decode.optional(decode.string))
+    use attempt <- decode.field(15, decode.int)
+    use max_attempts <- decode.field(16, decode.int)
+    use original_attempt_id <- decode.field(17, decode.optional(uuid_decoder()))
+    use previous_attempt_id <- decode.field(18, decode.optional(uuid_decoder()))
+    use retry_delay <- decode.field(19, decode.int)
+    use unique_key <- decode.field(20, decode.optional(decode.string))
     decode.success(InsertJobRow(
       id:,
-      status:,
+      queue_name:,
+      created_at:,
+      scheduled_at:,
       input:,
+      reserved_at:,
+      started_at:,
+      cancelled_at:,
+      finished_at:,
+      status:,
+      output:,
+      deadline:,
+      latest_heartbeat_at:,
+      failure_reason:,
+      error_data:,
       attempt:,
       max_attempts:,
       original_attempt_id:,
       previous_attempt_id:,
       retry_delay:,
+      unique_key:,
     ))
   }
 
@@ -391,14 +546,26 @@ pub fn insert_job(
   $10
 ) returning
     id,
-    status,
+    queue_name,
+    created_at::timestamp,
+    scheduled_at::timestamp,
     input,
+    reserved_at::timestamp,
+    started_at::timestamp,
+    cancelled_at::timestamp,
+    finished_at::timestamp,
+    status,
+    output,
+    deadline::timestamp,
+    latest_heartbeat_at::timestamp,
+    failure_reason,
+    error_data,
     attempt,
     max_attempts,
     original_attempt_id,
     previous_attempt_id,
-    -- TODO: use duration once supported in Squirrel
-    extract(epoch from retry_delay)::int as retry_delay;
+    extract(epoch from retry_delay)::int as retry_delay,
+    unique_key;
 "
   |> pog.query
   |> pog.parameter(pog.text(uuid.to_string(arg_1)))

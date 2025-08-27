@@ -213,19 +213,48 @@ pub fn unique_key(job, key unique_key) {
 
 /// Enqueue a job to be executed as soon as a worker is available.
 pub fn enqueue(conn, queue: Queue(input, output, error), job: Job(input)) {
-  insert_job(
-    conn,
-    queue.name,
-    job.scheduled_at,
-    queue.input_to_json(job.input),
-    1,
-    job.max_attempts,
-    option.None,
-    option.None,
-    option.map(job.retry_delay, duration_to_seconds)
-      |> option.unwrap(0.0),
-    job.unique_key,
+  use job <- result.try(
+    insert_job(
+      conn,
+      queue.name,
+      job.scheduled_at,
+      queue.input_to_json(job.input),
+      1,
+      job.max_attempts,
+      option.None,
+      option.None,
+      option.map(job.retry_delay, duration_to_seconds)
+        |> option.unwrap(0.0),
+      job.unique_key,
+    )
+    |> result.map_error(JobRecordFetchQueryError),
   )
+
+  case job.rows {
+    [] -> Error(NoJobRecordFound)
+    [row] ->
+      decode_job_record_row(queue, row)
+      |> result.map_error(fn(err) { JobRecordFetchDecodeErrors([err]) })
+    _ -> panic as "unreachable"
+  }
+}
+
+pub fn get_job(
+  conn: pog.Connection,
+  queue: Queue(input, output, error),
+  id: JobId,
+) -> Result(JobRecord(input, output, error), JobRecordFetchError) {
+  use job <- result.try(
+    sql_ext.get_job(conn, id.value)
+    |> result.map_error(JobRecordFetchQueryError),
+  )
+  case job.rows {
+    [] -> Error(NoJobRecordFound)
+    [row] ->
+      decode_job_record_row(queue, row)
+      |> result.map_error(fn(err) { JobRecordFetchDecodeErrors([err]) })
+    _ -> panic as "unreachable"
+  }
 }
 
 // Supervision structure:
@@ -323,15 +352,16 @@ pub type JobRecord(input, output, error) {
   )
 }
 
-type JobRecordDecodeError {
+pub type JobRecordDecodeError {
   JobRecordFetchInvalidStatusError(JobId, String)
   JobRecordFetchInvalidFailureReason(JobId, String)
   JobRecordFetchJsonDecodeError(JobId, json.DecodeError)
 }
 
-type JobRecordFetchError {
+pub type JobRecordFetchError {
   JobRecordFetchQueryError(pog.QueryError)
   JobRecordFetchDecodeErrors(List(JobRecordDecodeError))
+  NoJobRecordFound
 }
 
 fn job_record_decode_error_to_string(error: JobRecordDecodeError) -> String {
@@ -372,84 +402,87 @@ fn reserve_jobs(
     sql_ext.reserve_jobs(conn, queue.name, limit)
     |> result.map_error(JobRecordFetchQueryError),
   )
+  decode_multiple_job_record_rows(queue, jobs.rows)
+}
 
+fn decode_job_record_row(
+  queue: Queue(input, output, error),
+  job: sql_ext.JobRecordRow,
+) {
+  let job_id = JobId(job.id)
+  use status <- result.try(
+    job_status_from_string(job.status)
+    |> result.replace_error(JobRecordFetchInvalidStatusError(job_id, job.status)),
+  )
+  use input <- result.try(
+    json.parse(job.input, queue.input_decoder)
+    |> result.map_error(JobRecordFetchJsonDecodeError(job_id, _)),
+  )
+
+  let output_result = case job.output {
+    option.None -> Ok(option.None)
+    option.Some(output) -> {
+      json.parse(output, queue.output_decoder)
+      |> result.map(option.Some)
+      |> result.map_error(JobRecordFetchJsonDecodeError(job_id, _))
+    }
+  }
+  use output <- result.try(output_result)
+
+  let error_result = case job.error_data {
+    option.None -> Ok(option.None)
+    option.Some(error) -> {
+      json.parse(error, queue.error_decoder)
+      |> result.map(option.Some)
+      |> result.map_error(JobRecordFetchJsonDecodeError(job_id, _))
+    }
+  }
+  use error_data <- result.try(error_result)
+
+  let failure_reason_result = case job.failure_reason {
+    option.None -> Ok(option.None)
+    option.Some(reason) -> {
+      failure_reason_from_string(reason)
+      |> result.map(option.Some)
+      |> result.replace_error(JobRecordFetchInvalidFailureReason(job_id, reason))
+    }
+  }
+  use failure_reason <- result.try(failure_reason_result)
+
+  JobRecord(
+    id: job_id,
+    queue_name: job.queue_name,
+    created_at: job.created_at,
+    scheduled_at: job.scheduled_at,
+    input:,
+    reserved_at: job.reserved_at,
+    started_at: job.started_at,
+    cancelled_at: job.cancelled_at,
+    finished_at: job.finished_at,
+    status:,
+    output:,
+    deadline: job.deadline,
+    latest_heartbeat_at: job.latest_heartbeat_at,
+    failure_reason:,
+    error_data:,
+    attempt: job.attempt,
+    max_attempts: job.max_attempts,
+    original_attempt_id: option.map(job.original_attempt_id, JobId),
+    previous_attempt_id: option.map(job.previous_attempt_id, JobId),
+    retry_delay_seconds: job.retry_delay,
+    unique_key: job.unique_key,
+  )
+  |> Ok
+}
+
+fn decode_multiple_job_record_rows(
+  queue: Queue(input, output, error),
+  jobs: List(sql_ext.JobRecordRow),
+) {
   let #(valid_jobs, invalid_jobs) =
-    jobs.rows
-    |> list.map(fn(job) {
-      let job_id = JobId(job.id)
-      use status <- result.try(
-        job_status_from_string(job.status)
-        |> result.replace_error(JobRecordFetchInvalidStatusError(
-          job_id,
-          job.status,
-        )),
-      )
-      use input <- result.try(
-        json.parse(job.input, queue.input_decoder)
-        |> result.map_error(JobRecordFetchJsonDecodeError(job_id, _)),
-      )
-
-      let output_result = case job.output {
-        option.None -> Ok(option.None)
-        option.Some(output) -> {
-          json.parse(output, queue.output_decoder)
-          |> result.map(option.Some)
-          |> result.map_error(JobRecordFetchJsonDecodeError(job_id, _))
-        }
-      }
-      use output <- result.try(output_result)
-
-      let error_result = case job.error_data {
-        option.None -> Ok(option.None)
-        option.Some(error) -> {
-          json.parse(error, queue.error_decoder)
-          |> result.map(option.Some)
-          |> result.map_error(JobRecordFetchJsonDecodeError(job_id, _))
-        }
-      }
-      use error_data <- result.try(error_result)
-
-      let failure_reason_result = case job.failure_reason {
-        option.None -> Ok(option.None)
-        option.Some(reason) -> {
-          failure_reason_from_string(reason)
-          |> result.map(option.Some)
-          |> result.replace_error(JobRecordFetchInvalidFailureReason(
-            job_id,
-            reason,
-          ))
-        }
-      }
-      use failure_reason <- result.try(failure_reason_result)
-
-      JobRecord(
-        id: job_id,
-        queue_name: job.queue_name,
-        created_at: job.created_at,
-        scheduled_at: job.scheduled_at,
-        input:,
-        reserved_at: job.reserved_at,
-        started_at: job.started_at,
-        cancelled_at: job.cancelled_at,
-        finished_at: job.finished_at,
-        status:,
-        output:,
-        deadline: job.deadline,
-        latest_heartbeat_at: job.latest_heartbeat_at,
-        failure_reason:,
-        error_data:,
-        attempt: job.attempt,
-        max_attempts: job.max_attempts,
-        original_attempt_id: option.map(job.original_attempt_id, JobId),
-        previous_attempt_id: option.map(job.previous_attempt_id, JobId),
-        retry_delay_seconds: job.retry_delay,
-        unique_key: job.unique_key,
-      )
-      |> Ok
-    })
+    jobs
+    |> list.map(decode_job_record_row(queue, _))
     |> result.partition
-  // |> result.all
-  // |> result.map_error(JobRecordFetchDecodeError)
 
   case invalid_jobs {
     [] -> Ok(valid_jobs)
@@ -494,7 +527,7 @@ fn insert_job(
   previous_attempt_id: option.Option(uuid.Uuid),
   retry_delay: Float,
   unique_key: option.Option(String),
-) -> Result(pog.Returned(sql_ext.InsertJobRow), pog.QueryError) {
+) -> Result(pog.Returned(sql_ext.JobRecordRow), pog.QueryError) {
   sql_ext.insert_job(
     conn,
     uuid.v7(),
@@ -835,6 +868,7 @@ fn handle_queue_message(
                       |> string.join("\n")
                     },
                   )
+                NoJobRecordFound -> panic as "unreachable"
               }
           }
 

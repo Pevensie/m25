@@ -220,9 +220,8 @@ pub fn success_job_flow_test() {
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enqueued) = m25.enqueue(conn, queue, m25.new_job("A"))
-  let assert [row] = enqueued.rows
-  let job_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("A"))
+  let job_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -271,9 +270,8 @@ pub fn unique_key_after_failure_allows_enqueue_test() {
   let job1 =
     m25.new_job("X") |> m25.unique_key(key) |> m25.retry(1, option.None)
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq1) = m25.enqueue(conn, queue, job1)
-  let assert [row1] = enq1.rows
-  let original_id = uuid.to_string(row1.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, job1)
+  let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -305,14 +303,13 @@ pub fn unique_key_after_success_blocks_enqueue_test() {
   let key = "k-" <> uuid()
   let job1 = m25.new_job("X") |> m25.unique_key(key)
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq) = m25.enqueue(conn, queue, job1)
-  let assert [row] = enq.rows
-  let job_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, job1)
+  let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
   wait_until("job succeeds", 5000, fn() {
-    case job_status(conn, job_id) {
+    case job_status(conn, original_id) {
       Ok("succeeded") -> True
       _ -> False
     }
@@ -337,9 +334,8 @@ pub fn failing_job_retries_test() {
 
   let job = m25.new_job("X") |> m25.retry(3, option.Some(duration.seconds(1)))
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq) = m25.enqueue(conn, queue, job)
-  let assert [row] = enq.rows
-  let original_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, job)
+  let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -368,9 +364,8 @@ pub fn retry_immediate_delay_test() {
 
   let job = m25.new_job("X") |> m25.retry(2, option.None)
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq) = m25.enqueue(conn, queue, job)
-  let assert [row] = enq.rows
-  let original_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, job)
+  let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -397,9 +392,8 @@ pub fn retry_delay_spacing_test() {
   let delay = duration.seconds(2)
   let job = m25.new_job("X") |> m25.retry(2, option.Some(delay))
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq) = m25.enqueue(conn, queue, job)
-  let assert [row] = enq.rows
-  let original_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, job)
+  let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -435,9 +429,8 @@ pub fn crash_job_retries_test() {
     m25.new_job("X")
     |> m25.retry(max_attempts: 2, delay: option.Some(duration.milliseconds(1)))
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq) = m25.enqueue(conn, queue, job)
-  let assert [row] = enq.rows
-  let original_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, job)
+  let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -468,9 +461,8 @@ pub fn job_timeout_test() {
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq) = m25.enqueue(conn, queue, m25.new_job("X"))
-  let assert [row] = enq.rows
-  let original_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("X"))
+  let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -543,9 +535,8 @@ pub fn heartbeat_timeout_test() {
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq) = m25.enqueue(conn, queue, m25.new_job("X"))
-  let assert [row] = enq.rows
-  let original_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("X"))
+  let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -663,9 +654,8 @@ pub fn deadline_started_at_test() {
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq) = m25.enqueue(conn, queue, m25.new_job("X"))
-  let assert [row] = enq.rows
-  let job_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("X"))
+  let job_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -712,16 +702,14 @@ pub fn scheduled_future_and_past_test() {
   // Future scheduled job shouldn't execute before time
   let future_time = timestamp.add(timestamp.system_time(), duration.seconds(2))
   let job_future = m25.new_job("F") |> m25.schedule(at: future_time)
-  let assert Ok(enq_f) = m25.enqueue(conn, queue, job_future)
-  let assert [row_f] = enq_f.rows
-  let future_id = uuid.to_string(row_f.id)
+  let assert Ok(job_future) = m25.enqueue(conn, queue, job_future)
+  let future_id = uuid.to_string(job_future.id.value)
 
   // Past scheduled job should run immediately
   let past_time = timestamp.add(timestamp.system_time(), duration.seconds(-1))
   let job_past = m25.new_job("P") |> m25.schedule(at: past_time)
-  let assert Ok(enq_p) = m25.enqueue(conn, queue, job_past)
-  let assert [row_p] = enq_p.rows
-  let past_id = uuid.to_string(row_p.id)
+  let assert Ok(job_past) = m25.enqueue(conn, queue, job_past)
+  let past_id = uuid.to_string(job_past.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -763,14 +751,12 @@ pub fn persistence_output_and_error_test() {
   let assert Ok(app) =
     m25.new(conn) |> m25.add_queue(q_ok) |> result.try(m25.add_queue(_, q_err))
 
-  let assert Ok(enq1) = m25.enqueue(conn, q_ok, m25.new_job("A"))
-  let assert [row1] = enq1.rows
-  let ok_id = uuid.to_string(row1.id)
+  let assert Ok(job_1) = m25.enqueue(conn, q_ok, m25.new_job("A"))
+  let ok_id = uuid.to_string(job_1.id.value)
 
   let job2 = m25.new_job("B") |> m25.retry(1, option.None)
-  let assert Ok(enq2) = m25.enqueue(conn, q_err, job2)
-  let assert [row2] = enq2.rows
-  let err_original_id = uuid.to_string(row2.id)
+  let assert Ok(job_2) = m25.enqueue(conn, q_err, job2)
+  let err_original_id = uuid.to_string(job_2.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
@@ -808,9 +794,8 @@ pub fn reserved_timeout_recovery_test() {
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(enq) = m25.enqueue(conn, queue, m25.new_job("X"))
-  let assert [row] = enq.rows
-  let job_id = uuid.to_string(row.id)
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("X"))
+  let job_id = uuid.to_string(job.id.value)
 
   // Simulate a stuck reservation from an old process
   let assert Ok(_) =
@@ -843,7 +828,7 @@ pub fn add_queue_duplicate_name_test() {
   let assert Error(_) = m25.add_queue(m, queue)
 }
 
-pub fn decode_failure_pending_test() {
+pub fn decode_failure_insert_test() {
   use conn <- with_test_db
 
   let test_process = process.self()
@@ -862,18 +847,21 @@ pub fn decode_failure_pending_test() {
       },
     )
 
-  let assert Ok(app) = m25.new(conn) |> m25.add_queue(bad_queue)
-  let assert Ok(enq) = m25.enqueue(conn, bad_queue, m25.new_job(123))
-  let assert [row] = enq.rows
-  let job_id = uuid.to_string(row.id)
+  let assert Error(m25.JobRecordFetchDecodeErrors(_)) =
+    m25.enqueue(conn, bad_queue, m25.new_job(123))
+}
 
-  let assert Ok(started) = m25.start(app, 5000)
+pub fn get_job_test() {
+  use conn <- with_test_db
 
-  // Give it time to try and fail to decode; it should remain pending
-  process.sleep(1000)
-  let assert Ok("pending") = job_status(conn, job_id)
+  // Intentionally mismatch encoder/decoder: encode as string but decode as int
+  let queue = m25.Queue(..default_test_queue(), name: "int-get-job-" <> uuid())
 
-  process.send_exit(started.pid)
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("Hello, Joe!"))
+
+  let assert Ok(m25.JobRecord(id: job_id, ..)) =
+    m25.get_job(conn, queue, job.id)
+  assert job_id == job.id
 }
 
 fn uuid() -> String {
