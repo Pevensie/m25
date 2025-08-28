@@ -3,7 +3,7 @@ with successful_jobs as (
     update m25.job
     set
         started_at = now(),
-        deadline = now() + make_interval(secs => $2)
+        deadline = now() + timeout
     where id = any($1)
         and status = 'reserved'
     returning id
@@ -12,7 +12,7 @@ failed_jobs as (
     update m25.job
     set
         reserved_at = null
-    where id = any($3)
+    where id = any($2)
         and status = 'reserved'
     returning id
 )

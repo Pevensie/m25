@@ -8,6 +8,7 @@ select
     started_at::timestamp,
     cancelled_at::timestamp,
     finished_at::timestamp,
+    extract(epoch from timeout)::int as timeout,
     status,
     output,
     deadline::timestamp,

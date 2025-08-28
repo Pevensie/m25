@@ -66,7 +66,7 @@ fn default_test_queue() {
     error_decoder: decode.string,
     error_to_json: json.string,
     handler_function: fn(_) { Ok("") },
-    job_timeout: 5000,
+    default_job_timeout: duration.seconds(5),
     poll_interval: 50,
     heartbeat_interval: 500,
     allowed_heartbeat_misses: 10,
@@ -339,7 +339,7 @@ pub fn failing_job_retries_test() {
 
   let assert Ok(started) = m25.start(app, 5000)
 
-  wait_until("3 attempts to appear", 10_000, fn() {
+  wait_until("3 attempts appear", 10_000, fn() {
     case chain_completed_attempt_count(conn, original_id) {
       Ok(count) -> count >= 3
       _ -> False
@@ -446,22 +446,58 @@ pub fn crash_job_retries_test() {
   process.send_exit(started.pid)
 }
 
+pub fn queue_timeout_test() {
+  use conn <- with_test_db
+
+  let queue =
+    m25.Queue(
+      ..default_test_queue(),
+      name: "int-queue-timeout-" <> uuid(),
+      handler_function: fn(_) {
+        process.sleep(3000)
+        Ok("done")
+      },
+      default_job_timeout: duration.seconds(1),
+    )
+
+  let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("X"))
+  let original_id = uuid.to_string(job.id.value)
+
+  let assert Ok(started) = m25.start(app, 5000)
+
+  wait_until("job times out", 10_000, fn() {
+    case last_failure_reason(conn, original_id) {
+      Ok(option.Some("job_timeout")) -> True
+      _ -> False
+    }
+  })
+
+  process.send_exit(started.pid)
+}
+
+/// Test that a job's timeout will override the queue's timeout
 pub fn job_timeout_test() {
   use conn <- with_test_db
 
   let queue =
     m25.Queue(
       ..default_test_queue(),
-      name: "int-timeout-" <> uuid(),
+      name: "int-job-timeout-" <> uuid(),
       handler_function: fn(_) {
         process.sleep(3000)
         Ok("done")
       },
-      job_timeout: 1000,
+      default_job_timeout: duration.hours(1),
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("X"))
+  let assert Ok(job) =
+    m25.enqueue(
+      conn,
+      queue,
+      m25.new_job("X") |> m25.timeout(duration.milliseconds(100)),
+    )
   let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
@@ -650,7 +686,7 @@ pub fn deadline_started_at_test() {
         process.sleep(3000)
         Ok("done")
       },
-      job_timeout: 5000,
+      default_job_timeout: duration.seconds(5),
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)

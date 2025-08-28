@@ -53,8 +53,8 @@ pub type Queue(input, output, error) {
     error_decoder: decode.Decoder(error),
     /// The handler function to process the job.
     handler_function: fn(input) -> Result(output, error),
-    /// How long a job may run in milliseconds before it is considered failed.
-    job_timeout: Int,
+    /// How long a job may run before it is considered failed.
+    default_job_timeout: duration.Duration,
     /// How frequently the queue manager should check the database for new jobs in milliseconds.
     poll_interval: Int,
     /// How frequently to send heartbeat to the individual job manager in milliseconds.
@@ -174,6 +174,7 @@ pub opaque type Job(input) {
   Job(
     input: input,
     scheduled_at: option.Option(timestamp.Timestamp),
+    timeout: option.Option(duration.Duration),
     max_attempts: Int,
     retry_delay: option.Option(duration.Duration),
     unique_key: option.Option(String),
@@ -186,6 +187,7 @@ pub fn new_job(input: input) -> Job(input) {
   Job(
     input:,
     scheduled_at: option.None,
+    timeout: option.None,
     max_attempts: 1,
     retry_delay: option.None,
     unique_key: option.None,
@@ -196,6 +198,11 @@ pub fn new_job(input: input) -> Job(input) {
 /// job will be executed immediately.
 pub fn schedule(job, at scheduled_at) {
   Job(..job, scheduled_at: option.Some(scheduled_at))
+}
+
+/// Add a timeout to a job that overrides the queue's default timeout.
+pub fn timeout(job, timeout timeout) {
+  Job(..job, timeout: option.Some(timeout))
 }
 
 /// Configure retry behavior for a job. If no retry delay is provided, the job will be
@@ -219,11 +226,13 @@ pub fn enqueue(conn, queue: Queue(input, output, error), job: Job(input)) {
       queue.name,
       job.scheduled_at,
       queue.input_to_json(job.input),
+      option.unwrap(job.timeout, queue.default_job_timeout)
+        |> duration_to_seconds_float,
       1,
       job.max_attempts,
       option.None,
       option.None,
-      option.map(job.retry_delay, duration_to_seconds)
+      option.map(job.retry_delay, duration_to_seconds_float)
         |> option.unwrap(0.0),
       job.unique_key,
     )
@@ -258,8 +267,11 @@ pub fn get_job(
   }
 }
 
+/// Errors that can occur when cancelling a job.
 pub type JobCancelError {
+  /// The job could not be fetched from the database.
   JobCancelFetchError(JobRecordFetchError)
+  /// The job is not in a cancellable state.
   InvalidState(JobStatus)
 }
 
@@ -332,10 +344,15 @@ fn job_status_from_string(maybe_status: String) -> Result(JobStatus, Nil) {
   }
 }
 
+/// Reasons for a job failure.
 pub type FailureReason {
+  /// The job handler returned an error value.
   Errored
+  /// The job executor failed to respond to heartbeats.
   HeartbeatTimeout
+  /// The job timed out.
   JobTimeout
+  /// The job worker crashed.
   Crash
 }
 
@@ -375,8 +392,11 @@ pub type JobRecord(input, output, error) {
     started_at: option.Option(timestamp.Timestamp),
     cancelled_at: option.Option(timestamp.Timestamp),
     finished_at: option.Option(timestamp.Timestamp),
+    timeout: duration.Duration,
     status: JobStatus,
     output: option.Option(output),
+    /// The deadline for the job to complete once it has started, based on the
+    /// configured timeout.
     deadline: option.Option(timestamp.Timestamp),
     latest_heartbeat_at: option.Option(timestamp.Timestamp),
     failure_reason: option.Option(FailureReason),
@@ -385,17 +405,19 @@ pub type JobRecord(input, output, error) {
     max_attempts: Int,
     original_attempt_id: option.Option(JobId),
     previous_attempt_id: option.Option(JobId),
-    retry_delay_seconds: Int,
+    retry_delay: duration.Duration,
     unique_key: option.Option(String),
   )
 }
 
+/// Reasons a job record could not be decoded when fetching from the database.
 pub type JobRecordDecodeError {
   JobRecordFetchInvalidStatusError(JobId, String)
   JobRecordFetchInvalidFailureReason(JobId, String)
   JobRecordFetchJsonDecodeError(JobId, json.DecodeError)
 }
 
+/// An error that occurs when a job record can not be fetched from the database.
 pub type JobRecordFetchError {
   JobRecordFetchQueryError(pog.QueryError)
   JobRecordFetchDecodeErrors(List(JobRecordDecodeError))
@@ -497,6 +519,7 @@ fn decode_job_record_row(
     started_at: job.started_at,
     cancelled_at: job.cancelled_at,
     finished_at: job.finished_at,
+    timeout: duration.seconds(job.timeout),
     status:,
     output:,
     deadline: job.deadline,
@@ -507,7 +530,7 @@ fn decode_job_record_row(
     max_attempts: job.max_attempts,
     original_attempt_id: option.map(job.original_attempt_id, JobId),
     previous_attempt_id: option.map(job.previous_attempt_id, JobId),
-    retry_delay_seconds: job.retry_delay,
+    retry_delay: duration.seconds(job.retry_delay),
     unique_key: job.unique_key,
   )
   |> Ok
@@ -528,16 +551,14 @@ fn decode_multiple_job_record_rows(
   }
 }
 
-fn finalize_job_reservations(
+fn finalise_job_reservations(
   conn: pog.Connection,
   successful_job_ids: List(JobId),
   failed_job_ids: List(JobId),
-  timeout: Int,
 ) {
-  sql.finalize_job_reservations(
+  sql.finalise_job_reservations(
     conn,
     list.map(successful_job_ids, fn(id) { id.value }),
-    int.to_float(timeout) /. 1000.0,
     list.map(failed_job_ids, fn(id) { id.value }),
   )
 }
@@ -559,6 +580,7 @@ fn insert_job(
   queue_name: String,
   scheduled_at: option.Option(timestamp.Timestamp),
   input: json.Json,
+  timeout: Float,
   attempt: Int,
   max_attempts: Int,
   original_attempt_id: option.Option(uuid.Uuid),
@@ -572,6 +594,7 @@ fn insert_job(
     queue_name,
     option.map(scheduled_at, timestamp_to_unix_seconds_float),
     input,
+    timeout,
     attempt,
     max_attempts,
     original_attempt_id,
@@ -790,12 +813,7 @@ fn handle_queue_message(
 
           let finalize_result =
             pog.transaction(state.conn, fn(conn) {
-              finalize_job_reservations(
-                conn,
-                successful_ids,
-                failed_ids,
-                state.queue.job_timeout,
-              )
+              finalise_job_reservations(conn, successful_ids, failed_ids)
               |> result.map_error(fn(err) {
                 ProcessJobsQueryError(
                   when: "finalizing job reservations",
@@ -1244,7 +1262,7 @@ fn do_retry_exponential(
   }
 }
 
-fn duration_to_seconds(duration: duration.Duration) -> Float {
+fn duration_to_seconds_float(duration: duration.Duration) -> Float {
   let #(seconds, nanoseconds) = duration.to_seconds_and_nanoseconds(duration)
   int.to_float(seconds)
   +. int.to_float(nanoseconds)

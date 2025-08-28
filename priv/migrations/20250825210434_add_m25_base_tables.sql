@@ -12,6 +12,7 @@ create table if not exists m25.job (
     started_at timestamptz,
     cancelled_at timestamptz,
     finished_at timestamptz,
+    timeout interval not null,
     output jsonb,
     deadline timestamptz,
     latest_heartbeat_at timestamptz,

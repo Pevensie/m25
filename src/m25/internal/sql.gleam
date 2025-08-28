@@ -28,6 +28,7 @@ pub type CancelJobRow {
     started_at: Timestamp,
     cancelled_at: Timestamp,
     finished_at: Timestamp,
+    timeout: Int,
     status: String,
     output: String,
     deadline: Timestamp,
@@ -60,19 +61,20 @@ pub fn cancel_job(db, arg_1) {
     use started_at <- decode.field(6, pog.timestamp_decoder())
     use cancelled_at <- decode.field(7, pog.timestamp_decoder())
     use finished_at <- decode.field(8, pog.timestamp_decoder())
-    use status <- decode.field(9, decode.string)
-    use output <- decode.field(10, decode.string)
-    use deadline <- decode.field(11, pog.timestamp_decoder())
-    use latest_heartbeat_at <- decode.field(12, pog.timestamp_decoder())
-    use failure_reason <- decode.field(13, decode.string)
-    use error_data <- decode.field(14, decode.string)
-    use attempt <- decode.field(15, decode.int)
-    use max_attempts <- decode.field(16, decode.int)
-    use original_attempt_id <- decode.field(17, uuid_decoder())
-    use previous_attempt_id <- decode.field(18, uuid_decoder())
-    use retry_delay <- decode.field(19, decode.int)
-    use unique_key <- decode.field(20, decode.string)
-    use cancel_outcome <- decode.field(21, decode.string)
+    use timeout <- decode.field(9, decode.int)
+    use status <- decode.field(10, decode.string)
+    use output <- decode.field(11, decode.string)
+    use deadline <- decode.field(12, pog.timestamp_decoder())
+    use latest_heartbeat_at <- decode.field(13, pog.timestamp_decoder())
+    use failure_reason <- decode.field(14, decode.string)
+    use error_data <- decode.field(15, decode.string)
+    use attempt <- decode.field(16, decode.int)
+    use max_attempts <- decode.field(17, decode.int)
+    use original_attempt_id <- decode.field(18, uuid_decoder())
+    use previous_attempt_id <- decode.field(19, uuid_decoder())
+    use retry_delay <- decode.field(20, decode.int)
+    use unique_key <- decode.field(21, decode.string)
+    use cancel_outcome <- decode.field(22, decode.string)
     decode.success(CancelJobRow(
       id:,
       queue_name:,
@@ -83,6 +85,7 @@ pub fn cancel_job(db, arg_1) {
       started_at:,
       cancelled_at:,
       finished_at:,
+      timeout:,
       status:,
       output:,
       deadline:,
@@ -111,6 +114,7 @@ with target as (
         started_at::timestamp,
         cancelled_at::timestamp,
         finished_at::timestamp,
+        extract(epoch from timeout)::int as timeout,
         status,
         output,
         deadline::timestamp,
@@ -141,6 +145,7 @@ updated as (
         j.started_at::timestamp,
         j.cancelled_at::timestamp,
         j.finished_at::timestamp,
+        extract(epoch from j.timeout)::int as timeout,
         j.status,
         j.output,
         j.deadline::timestamp,
@@ -164,6 +169,7 @@ select
     coalesce(u.started_at, t.started_at)::timestamp as started_at,
     coalesce(u.cancelled_at, t.cancelled_at)::timestamp as cancelled_at,
     coalesce(u.finished_at, t.finished_at)::timestamp as finished_at,
+    coalesce(u.timeout, t.timeout)::int as timeout,
     coalesce(u.status, t.status) as status,
     coalesce(u.output, t.output) as output,
     coalesce(u.deadline, t.deadline)::timestamp as deadline,
@@ -381,14 +387,14 @@ returning
   |> pog.execute(db)
 }
 
-/// A row you get from running the `finalize_job_reservations` query
-/// defined in `./src/m25/internal/sql/finalize_job_reservations.sql`.
+/// A row you get from running the `finalise_job_reservations` query
+/// defined in `./src/m25/internal/sql/finalise_job_reservations.sql`.
 ///
 /// > 🐿️ This type definition was generated automatically using v4.2.0 of the
 /// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
 ///
-pub type FinalizeJobReservationsRow {
-  FinalizeJobReservationsRow(successful_count: Int, failed_count: Int)
+pub type FinaliseJobReservationsRow {
+  FinaliseJobReservationsRow(successful_count: Int, failed_count: Int)
 }
 
 /// Promote successful reservations to executing, revert failures to pending
@@ -396,11 +402,11 @@ pub type FinalizeJobReservationsRow {
 /// > 🐿️ This function was generated automatically using v4.2.0 of
 /// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
 ///
-pub fn finalize_job_reservations(db, arg_1, arg_2, arg_3) {
+pub fn finalise_job_reservations(db, arg_1, arg_2) {
   let decoder = {
     use successful_count <- decode.field(0, decode.int)
     use failed_count <- decode.field(1, decode.int)
-    decode.success(FinalizeJobReservationsRow(successful_count:, failed_count:))
+    decode.success(FinaliseJobReservationsRow(successful_count:, failed_count:))
   }
 
   "-- Promote successful reservations to executing, revert failures to pending
@@ -408,7 +414,7 @@ with successful_jobs as (
     update m25.job
     set
         started_at = now(),
-        deadline = now() + make_interval(secs => $2)
+        deadline = now() + timeout
     where id = any($1)
         and status = 'reserved'
     returning id
@@ -417,7 +423,7 @@ failed_jobs as (
     update m25.job
     set
         reserved_at = null
-    where id = any($3)
+    where id = any($2)
         and status = 'reserved'
     returning id
 )
@@ -430,10 +436,9 @@ select
     fn(value) { pog.text(uuid.to_string(value)) },
     arg_1,
   ))
-  |> pog.parameter(pog.float(arg_2))
   |> pog.parameter(pog.array(
     fn(value) { pog.text(uuid.to_string(value)) },
-    arg_3,
+    arg_2,
   ))
   |> pog.returning(decoder)
   |> pog.execute(db)
@@ -456,6 +461,7 @@ pub type GetJobRow {
     started_at: Timestamp,
     cancelled_at: Timestamp,
     finished_at: Timestamp,
+    timeout: Int,
     status: String,
     output: Option(String),
     deadline: Timestamp,
@@ -488,18 +494,19 @@ pub fn get_job(db, arg_1) {
     use started_at <- decode.field(6, pog.timestamp_decoder())
     use cancelled_at <- decode.field(7, pog.timestamp_decoder())
     use finished_at <- decode.field(8, pog.timestamp_decoder())
-    use status <- decode.field(9, decode.string)
-    use output <- decode.field(10, decode.optional(decode.string))
-    use deadline <- decode.field(11, pog.timestamp_decoder())
-    use latest_heartbeat_at <- decode.field(12, pog.timestamp_decoder())
-    use failure_reason <- decode.field(13, decode.optional(decode.string))
-    use error_data <- decode.field(14, decode.optional(decode.string))
-    use attempt <- decode.field(15, decode.int)
-    use max_attempts <- decode.field(16, decode.int)
-    use original_attempt_id <- decode.field(17, decode.optional(uuid_decoder()))
-    use previous_attempt_id <- decode.field(18, decode.optional(uuid_decoder()))
-    use retry_delay <- decode.field(19, decode.int)
-    use unique_key <- decode.field(20, decode.optional(decode.string))
+    use timeout <- decode.field(9, decode.int)
+    use status <- decode.field(10, decode.string)
+    use output <- decode.field(11, decode.optional(decode.string))
+    use deadline <- decode.field(12, pog.timestamp_decoder())
+    use latest_heartbeat_at <- decode.field(13, pog.timestamp_decoder())
+    use failure_reason <- decode.field(14, decode.optional(decode.string))
+    use error_data <- decode.field(15, decode.optional(decode.string))
+    use attempt <- decode.field(16, decode.int)
+    use max_attempts <- decode.field(17, decode.int)
+    use original_attempt_id <- decode.field(18, decode.optional(uuid_decoder()))
+    use previous_attempt_id <- decode.field(19, decode.optional(uuid_decoder()))
+    use retry_delay <- decode.field(20, decode.int)
+    use unique_key <- decode.field(21, decode.optional(decode.string))
     decode.success(GetJobRow(
       id:,
       queue_name:,
@@ -510,6 +517,7 @@ pub fn get_job(db, arg_1) {
       started_at:,
       cancelled_at:,
       finished_at:,
+      timeout:,
       status:,
       output:,
       deadline:,
@@ -535,6 +543,7 @@ pub fn get_job(db, arg_1) {
     started_at::timestamp,
     cancelled_at::timestamp,
     finished_at::timestamp,
+    extract(epoch from timeout)::int as timeout,
     status,
     output,
     deadline::timestamp,
@@ -617,6 +626,7 @@ pub type InsertJobRow {
     started_at: Timestamp,
     cancelled_at: Timestamp,
     finished_at: Timestamp,
+    timeout: Int,
     status: String,
     output: Option(String),
     deadline: Timestamp,
@@ -650,6 +660,7 @@ pub fn insert_job(
   arg_8,
   arg_9,
   arg_10,
+  arg_11,
 ) {
   let decoder = {
     use id <- decode.field(0, uuid_decoder())
@@ -661,18 +672,19 @@ pub fn insert_job(
     use started_at <- decode.field(6, pog.timestamp_decoder())
     use cancelled_at <- decode.field(7, pog.timestamp_decoder())
     use finished_at <- decode.field(8, pog.timestamp_decoder())
-    use status <- decode.field(9, decode.string)
-    use output <- decode.field(10, decode.optional(decode.string))
-    use deadline <- decode.field(11, pog.timestamp_decoder())
-    use latest_heartbeat_at <- decode.field(12, pog.timestamp_decoder())
-    use failure_reason <- decode.field(13, decode.optional(decode.string))
-    use error_data <- decode.field(14, decode.optional(decode.string))
-    use attempt <- decode.field(15, decode.int)
-    use max_attempts <- decode.field(16, decode.int)
-    use original_attempt_id <- decode.field(17, decode.optional(uuid_decoder()))
-    use previous_attempt_id <- decode.field(18, decode.optional(uuid_decoder()))
-    use retry_delay <- decode.field(19, decode.int)
-    use unique_key <- decode.field(20, decode.optional(decode.string))
+    use timeout <- decode.field(9, decode.int)
+    use status <- decode.field(10, decode.string)
+    use output <- decode.field(11, decode.optional(decode.string))
+    use deadline <- decode.field(12, pog.timestamp_decoder())
+    use latest_heartbeat_at <- decode.field(13, pog.timestamp_decoder())
+    use failure_reason <- decode.field(14, decode.optional(decode.string))
+    use error_data <- decode.field(15, decode.optional(decode.string))
+    use attempt <- decode.field(16, decode.int)
+    use max_attempts <- decode.field(17, decode.int)
+    use original_attempt_id <- decode.field(18, decode.optional(uuid_decoder()))
+    use previous_attempt_id <- decode.field(19, decode.optional(uuid_decoder()))
+    use retry_delay <- decode.field(20, decode.int)
+    use unique_key <- decode.field(21, decode.optional(decode.string))
     decode.success(InsertJobRow(
       id:,
       queue_name:,
@@ -683,6 +695,7 @@ pub fn insert_job(
       started_at:,
       cancelled_at:,
       finished_at:,
+      timeout:,
       status:,
       output:,
       deadline:,
@@ -699,27 +712,29 @@ pub fn insert_job(
   }
 
   "insert into m25.job (
-  id,
-  queue_name,
-  scheduled_at,
-  input,
-  attempt,
-  max_attempts,
-  original_attempt_id,
-  previous_attempt_id,
-  retry_delay,
-  unique_key
-) values (
-  $1,
-  $2,
-  to_timestamp($3),
-  $4,
-  $5,
-  $6,
-  $7,
-  $8,
-  make_interval(secs => $9),
-  $10
+    id,
+    queue_name,
+    scheduled_at,
+    input,
+    timeout,
+    attempt,
+    max_attempts,
+    original_attempt_id,
+    previous_attempt_id,
+    retry_delay,
+    unique_key
+    ) values (
+    $1,
+    $2,
+    to_timestamp($3),
+    $4,
+    make_interval(secs => $5),
+    $6,
+    $7,
+    $8,
+    $9,
+    make_interval(secs => $10),
+    $11
 ) returning
     id,
     queue_name,
@@ -730,6 +745,7 @@ pub fn insert_job(
     started_at::timestamp,
     cancelled_at::timestamp,
     finished_at::timestamp,
+    extract(epoch from timeout)::int as timeout,
     status,
     output,
     deadline::timestamp,
@@ -748,12 +764,13 @@ pub fn insert_job(
   |> pog.parameter(pog.text(arg_2))
   |> pog.parameter(pog.float(arg_3))
   |> pog.parameter(pog.text(json.to_string(arg_4)))
-  |> pog.parameter(pog.int(arg_5))
+  |> pog.parameter(pog.float(arg_5))
   |> pog.parameter(pog.int(arg_6))
-  |> pog.parameter(pog.text(uuid.to_string(arg_7)))
+  |> pog.parameter(pog.int(arg_7))
   |> pog.parameter(pog.text(uuid.to_string(arg_8)))
-  |> pog.parameter(pog.float(arg_9))
-  |> pog.parameter(pog.text(arg_10))
+  |> pog.parameter(pog.text(uuid.to_string(arg_9)))
+  |> pog.parameter(pog.float(arg_10))
+  |> pog.parameter(pog.text(arg_11))
   |> pog.returning(decoder)
   |> pog.execute(db)
 }
@@ -775,6 +792,7 @@ pub type ReserveJobsRow {
     started_at: Timestamp,
     cancelled_at: Timestamp,
     finished_at: Timestamp,
+    timeout: Int,
     status: String,
     output: Option(String),
     deadline: Timestamp,
@@ -807,18 +825,19 @@ pub fn reserve_jobs(db, arg_1, arg_2) {
     use started_at <- decode.field(6, pog.timestamp_decoder())
     use cancelled_at <- decode.field(7, pog.timestamp_decoder())
     use finished_at <- decode.field(8, pog.timestamp_decoder())
-    use status <- decode.field(9, decode.string)
-    use output <- decode.field(10, decode.optional(decode.string))
-    use deadline <- decode.field(11, pog.timestamp_decoder())
-    use latest_heartbeat_at <- decode.field(12, pog.timestamp_decoder())
-    use failure_reason <- decode.field(13, decode.optional(decode.string))
-    use error_data <- decode.field(14, decode.optional(decode.string))
-    use attempt <- decode.field(15, decode.int)
-    use max_attempts <- decode.field(16, decode.int)
-    use original_attempt_id <- decode.field(17, decode.optional(uuid_decoder()))
-    use previous_attempt_id <- decode.field(18, decode.optional(uuid_decoder()))
-    use retry_delay <- decode.field(19, decode.int)
-    use unique_key <- decode.field(20, decode.optional(decode.string))
+    use timeout <- decode.field(9, decode.int)
+    use status <- decode.field(10, decode.string)
+    use output <- decode.field(11, decode.optional(decode.string))
+    use deadline <- decode.field(12, pog.timestamp_decoder())
+    use latest_heartbeat_at <- decode.field(13, pog.timestamp_decoder())
+    use failure_reason <- decode.field(14, decode.optional(decode.string))
+    use error_data <- decode.field(15, decode.optional(decode.string))
+    use attempt <- decode.field(16, decode.int)
+    use max_attempts <- decode.field(17, decode.int)
+    use original_attempt_id <- decode.field(18, decode.optional(uuid_decoder()))
+    use previous_attempt_id <- decode.field(19, decode.optional(uuid_decoder()))
+    use retry_delay <- decode.field(20, decode.int)
+    use unique_key <- decode.field(21, decode.optional(decode.string))
     decode.success(ReserveJobsRow(
       id:,
       queue_name:,
@@ -829,6 +848,7 @@ pub fn reserve_jobs(db, arg_1, arg_2) {
       started_at:,
       cancelled_at:,
       finished_at:,
+      timeout:,
       status:,
       output:,
       deadline:,
@@ -867,6 +887,7 @@ returning
     started_at::timestamp,
     cancelled_at::timestamp,
     finished_at::timestamp,
+    extract(epoch from timeout)::int as timeout,
     status,
     output,
     deadline::timestamp,
@@ -900,6 +921,7 @@ pub fn retry_if_needed(db, arg_1) {
     queue_name,
     scheduled_at,
     input,
+    timeout,
     attempt,
     max_attempts,
     original_attempt_id,
@@ -911,6 +933,7 @@ pub fn retry_if_needed(db, arg_1) {
         queue_name,
         now() + retry_delay as scheduled_at,
         input,
+        timeout,
         attempt + 1 as attempt,
         max_attempts,
         coalesce(original_attempt_id, id) as original_attempt_id,

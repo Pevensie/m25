@@ -48,7 +48,7 @@ pub fn main() -> Nil {
         io.println("Running job with input: " <> input.value)
         Ok("Ok")
       },
-      job_timeout: 60 * 60 * 1000,
+      default_job_timeout: duration.hours(1),
       poll_interval: 5000,
       heartbeat_interval: 3000,
       allowed_heartbeat_misses: 3,
