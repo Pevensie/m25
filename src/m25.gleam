@@ -239,6 +239,7 @@ pub fn enqueue(conn, queue: Queue(input, output, error), job: Job(input)) {
   }
 }
 
+/// Get a job from the database by its ID.
 pub fn get_job(
   conn: pog.Connection,
   queue: Queue(input, output, error),
@@ -253,6 +254,43 @@ pub fn get_job(
     [row] ->
       decode_job_record_row(queue, row)
       |> result.map_error(fn(err) { JobRecordFetchDecodeErrors([err]) })
+    _ -> panic as "unreachable"
+  }
+}
+
+pub type JobCancelError {
+  JobCancelFetchError(JobRecordFetchError)
+  InvalidState(JobStatus)
+}
+
+/// Cancel a job from the database by its ID. You can only cancel a job that is in the
+/// `Pending` state.
+pub fn cancel_job(
+  conn: pog.Connection,
+  queue: Queue(input, output, error),
+  id: JobId,
+) -> Result(JobRecord(input, output, error), JobCancelError) {
+  use job <- result.try(
+    sql_ext.cancel_job(conn, id.value)
+    |> result.map_error(fn(err) {
+      JobCancelFetchError(JobRecordFetchQueryError(err))
+    }),
+  )
+  case job.rows {
+    [] -> Error(JobCancelFetchError(NoJobRecordFound))
+    [#(row, cancel_outcome)] -> {
+      use job_record <- result.try(
+        decode_job_record_row(queue, row)
+        |> result.map_error(fn(err) {
+          JobCancelFetchError(JobRecordFetchDecodeErrors([err]))
+        }),
+      )
+
+      case cancel_outcome {
+        sql_ext.NotPending -> Error(InvalidState(job_record.status))
+        sql_ext.Cancelled -> Ok(job_record)
+      }
+    }
     _ -> panic as "unreachable"
   }
 }

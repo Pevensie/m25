@@ -11,6 +11,181 @@ import gleam/time/timestamp.{type Timestamp}
 import pog
 import youid/uuid.{type Uuid}
 
+/// A row you get from running the `cancel_job` query
+/// defined in `./src/m25/internal/sql/cancel_job.sql`.
+///
+/// > 🐿️ This type definition was generated automatically using v4.2.0 of the
+/// > [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub type CancelJobRow {
+  CancelJobRow(
+    id: Uuid,
+    queue_name: String,
+    created_at: Timestamp,
+    scheduled_at: Timestamp,
+    input: String,
+    reserved_at: Timestamp,
+    started_at: Timestamp,
+    cancelled_at: Timestamp,
+    finished_at: Timestamp,
+    status: String,
+    output: String,
+    deadline: Timestamp,
+    latest_heartbeat_at: Timestamp,
+    failure_reason: String,
+    error_data: String,
+    attempt: Int,
+    max_attempts: Int,
+    original_attempt_id: Uuid,
+    previous_attempt_id: Uuid,
+    retry_delay: Int,
+    unique_key: String,
+    cancel_outcome: String,
+  )
+}
+
+/// Cancel a job only if it's pending, and distinguish outcomes in one query
+///
+/// > 🐿️ This function was generated automatically using v4.2.0 of
+/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub fn cancel_job(db, arg_1) {
+  let decoder = {
+    use id <- decode.field(0, uuid_decoder())
+    use queue_name <- decode.field(1, decode.string)
+    use created_at <- decode.field(2, pog.timestamp_decoder())
+    use scheduled_at <- decode.field(3, pog.timestamp_decoder())
+    use input <- decode.field(4, decode.string)
+    use reserved_at <- decode.field(5, pog.timestamp_decoder())
+    use started_at <- decode.field(6, pog.timestamp_decoder())
+    use cancelled_at <- decode.field(7, pog.timestamp_decoder())
+    use finished_at <- decode.field(8, pog.timestamp_decoder())
+    use status <- decode.field(9, decode.string)
+    use output <- decode.field(10, decode.string)
+    use deadline <- decode.field(11, pog.timestamp_decoder())
+    use latest_heartbeat_at <- decode.field(12, pog.timestamp_decoder())
+    use failure_reason <- decode.field(13, decode.string)
+    use error_data <- decode.field(14, decode.string)
+    use attempt <- decode.field(15, decode.int)
+    use max_attempts <- decode.field(16, decode.int)
+    use original_attempt_id <- decode.field(17, uuid_decoder())
+    use previous_attempt_id <- decode.field(18, uuid_decoder())
+    use retry_delay <- decode.field(19, decode.int)
+    use unique_key <- decode.field(20, decode.string)
+    use cancel_outcome <- decode.field(21, decode.string)
+    decode.success(CancelJobRow(
+      id:,
+      queue_name:,
+      created_at:,
+      scheduled_at:,
+      input:,
+      reserved_at:,
+      started_at:,
+      cancelled_at:,
+      finished_at:,
+      status:,
+      output:,
+      deadline:,
+      latest_heartbeat_at:,
+      failure_reason:,
+      error_data:,
+      attempt:,
+      max_attempts:,
+      original_attempt_id:,
+      previous_attempt_id:,
+      retry_delay:,
+      unique_key:,
+      cancel_outcome:,
+    ))
+  }
+
+  "-- Cancel a job only if it's pending, and distinguish outcomes in one query
+with target as (
+    select
+        id,
+        queue_name,
+        created_at::timestamp,
+        scheduled_at::timestamp,
+        input,
+        reserved_at::timestamp,
+        started_at::timestamp,
+        cancelled_at::timestamp,
+        finished_at::timestamp,
+        status,
+        output,
+        deadline::timestamp,
+        latest_heartbeat_at::timestamp,
+        failure_reason,
+        error_data,
+        attempt,
+        max_attempts,
+        original_attempt_id,
+        previous_attempt_id,
+        extract(epoch from retry_delay)::int as retry_delay,
+        unique_key
+    from m25.job where id = $1
+),
+updated as (
+    update m25.job j
+    set cancelled_at = now()
+    from target t
+    where j.id = t.id
+      and t.status = 'pending'
+    returning
+        j.id,
+        j.queue_name,
+        j.created_at::timestamp,
+        j.scheduled_at::timestamp,
+        j.input,
+        j.reserved_at::timestamp,
+        j.started_at::timestamp,
+        j.cancelled_at::timestamp,
+        j.finished_at::timestamp,
+        j.status,
+        j.output,
+        j.deadline::timestamp,
+        j.latest_heartbeat_at::timestamp,
+        j.failure_reason,
+        j.error_data,
+        j.attempt,
+        j.max_attempts,
+        j.original_attempt_id,
+        j.previous_attempt_id,
+        extract(epoch from j.retry_delay)::int as retry_delay,
+        j.unique_key
+)
+select
+    coalesce(u.id, t.id) as id,
+    coalesce(u.queue_name, t.queue_name) as queue_name,
+    coalesce(u.created_at, t.created_at)::timestamp as created_at,
+    coalesce(u.scheduled_at, t.scheduled_at)::timestamp as scheduled_at,
+    coalesce(u.input, t.input) as input,
+    coalesce(u.reserved_at, t.reserved_at)::timestamp as reserved_at,
+    coalesce(u.started_at, t.started_at)::timestamp as started_at,
+    coalesce(u.cancelled_at, t.cancelled_at)::timestamp as cancelled_at,
+    coalesce(u.finished_at, t.finished_at)::timestamp as finished_at,
+    coalesce(u.status, t.status) as status,
+    coalesce(u.output, t.output) as output,
+    coalesce(u.deadline, t.deadline)::timestamp as deadline,
+    coalesce(u.latest_heartbeat_at, t.latest_heartbeat_at)::timestamp as latest_heartbeat_at,
+    coalesce(u.failure_reason, t.failure_reason) as failure_reason,
+    coalesce(u.error_data, t.error_data) as error_data,
+    coalesce(u.attempt, t.attempt) as attempt,
+    coalesce(u.max_attempts, t.max_attempts) as max_attempts,
+    coalesce(u.original_attempt_id, t.original_attempt_id) as original_attempt_id,
+    coalesce(u.previous_attempt_id, t.previous_attempt_id) as previous_attempt_id,
+    coalesce(u.retry_delay, t.retry_delay) as retry_delay,
+    coalesce(u.unique_key, t.unique_key) as unique_key,
+    case when u.id is not null then 'cancelled' else 'not_pending' end as cancel_outcome
+from target t
+left join updated u on u.id = t.id;
+"
+  |> pog.query
+  |> pog.parameter(pog.text(uuid.to_string(arg_1)))
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
 /// A row you get from running the `cleanup_stuck_reservations` query
 /// defined in `./src/m25/internal/sql/cleanup_stuck_reservations.sql`.
 ///

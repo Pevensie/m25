@@ -864,6 +864,73 @@ pub fn get_job_test() {
   assert job_id == job.id
 }
 
+pub fn cancel_job_pending_succeeds_test() {
+  use conn <- with_test_db
+
+  let queue =
+    m25.Queue(..default_test_queue(), name: "int-cancel-ok-" <> uuid())
+
+  // Enqueue but do not start workers so it stays pending
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("X"))
+  let id_str = uuid.to_string(job.id.value)
+
+  // Cancel should succeed and set status to cancelled
+  let assert Ok(_) = m25.cancel_job(conn, queue, job.id)
+
+  let assert Ok("cancelled") = job_status(conn, id_str)
+}
+
+pub fn cancel_job_non_pending_fails_test() {
+  use conn <- with_test_db
+
+  let queue =
+    m25.Queue(..default_test_queue(), name: "int-cancel-fail-" <> uuid())
+
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("Y"))
+  let id_str = uuid.to_string(job.id.value)
+
+  // Move job to a non-pending state (reserved)
+  let assert Ok(_) =
+    pog.query("update m25.job set reserved_at = now() where id = $1")
+    |> pog.parameter(pog.text(id_str))
+    |> pog.execute(conn)
+
+  // Cancel should fail with InvalidState(Reserved)
+  let assert Error(m25.InvalidState(m25.Reserved)) =
+    m25.cancel_job(conn, queue, job.id)
+}
+
+pub fn cancelled_job_is_not_executed_test() {
+  use conn <- with_test_db
+
+  let queue =
+    m25.Queue(
+      ..default_test_queue(),
+      name: "int-cancel-no-exec-" <> uuid(),
+      handler_function: fn(_) {
+        // If this runs, something went wrong; but we also assert status later
+        Ok("done")
+      },
+    )
+
+  let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
+  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("Z"))
+  let id_str = uuid.to_string(job.id.value)
+
+  // Cancel while pending
+  let assert Ok(_) = m25.cancel_job(conn, queue, job.id)
+  let assert Ok("cancelled") = job_status(conn, id_str)
+
+  // Start workers; the cancelled job must not be picked up/executed
+  let assert Ok(started) = m25.start(app, 5000)
+  process.sleep(600)
+
+  // Ensure it remains cancelled after workers have been running
+  let assert Ok("cancelled") = job_status(conn, id_str)
+
+  process.send_exit(started.pid)
+}
+
 fn uuid() -> String {
   uuid.v4()
   |> uuid.to_string
