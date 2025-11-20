@@ -99,7 +99,8 @@ The required SQL statements will be printed to the console for use with other mi
 tools like [`dbmate`](https://github.com/amacneil/dbmate). Alternatively, you can
 apply the migrations directly using the `--apply` flag.
 
-Support for [Cigogne](https://github.com/Billuc/cigogne) is in the works.
+When using [Cigogne](https://github.com/Billuc/cigogne), you can include the migrations 
+into your project by running `gleam run -m cigogne include --name m25`.
 
 ## Development
 
