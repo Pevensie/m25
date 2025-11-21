@@ -1,8 +1,8 @@
 import argv
-import filepath
+import cigogne
+import cigogne/config
 import gleam/bool
 import gleam/dynamic/decode
-import gleam/erlang/application
 import gleam/erlang/process
 import gleam/io
 import gleam/list
@@ -15,10 +15,7 @@ import gleam/time/calendar
 import gleam/time/timestamp
 import glint
 import pog
-import simplifile
 import snag
-import tempo
-import tempo/datetime
 
 fn add_error_context(error: String, context: String) {
   context <> ": " <> error
@@ -77,74 +74,49 @@ fn get_current_version(
   }
 }
 
-fn get_migrations() -> Result(List(String), String) {
-  use priv <- result.try(
-    application.priv_directory("m25")
-    |> result.replace_error("Couldn't get priv directory"),
-  )
-
-  let assert Ok(directory) =
-    [priv, "migrations"]
-    |> list.reduce(filepath.join)
-
-  simplifile.get_files(directory)
-  |> result.map_error(fn(err) {
-    err
-    |> string.inspect
-    |> add_error_context("Unable to get files in priv directory")
-  })
-}
-
-fn version_from_filename(filename: String) -> timestamp.Timestamp {
-  let assert Ok(filename) = filename |> filepath.split |> list.last
-  let assert Ok(version_string) = filename |> string.split("_") |> list.first
-  // gtempo requires an offset to be specified, so add one manually
-  let assert Ok(version) =
-    datetime.parse(version_string <> "Z", tempo.Custom("YYYYMMDDHHmmssZ"))
-  datetime.to_timestamp(version)
-}
-
 fn get_migrations_to_apply(
   current_version: option.Option(timestamp.Timestamp),
 ) -> Result(option.Option(String), String) {
-  use files <- result.try(
-    get_migrations()
-    |> result.map_error(add_error_context(
-      _,
-      "Failed to get migrations for m25 tables",
-    )),
+  use config <- result.try(
+    config.get("m25")
+    |> result.map_error(fn(err) {
+      err
+      |> string.inspect
+      |> add_error_context("Failed to get migrations configuration")
+    }),
   )
 
-  let files_to_apply = case current_version {
-    option.None -> files
+  use engine <- result.try(
+    cigogne.create_engine(config)
+    |> result.map_error(fn(err) {
+      err
+      |> string.inspect
+      |> add_error_context("Failed to create migrations engine")
+    }),
+  )
+
+  let migrations = cigogne.get_all_migrations(engine)
+
+  let migrations_to_apply = case current_version {
+    option.None -> migrations
     option.Some(current_version) -> {
-      files
-      |> list.filter(fn(file) {
-        timestamp.compare(version_from_filename(file), current_version)
-        == order.Gt
+      migrations
+      |> list.filter(fn(migration) {
+        timestamp.compare(migration.timestamp, current_version) == order.Gt
       })
     }
   }
 
   // Check if there are files to apply
-  use <- bool.guard(
-    case files_to_apply {
-      [] -> True
-      _ -> False
-    },
-    Ok(option.None),
-  )
-  use migration_sql <- result.try(
-    files_to_apply
-    |> list.try_map(simplifile.read)
-    |> result.map(string.join(_, "\n"))
-    |> result.map_error(fn(err) {
-      add_error_context(string.inspect(err), "Failed to read migrations")
-    }),
-  )
+  use <- bool.guard(list.is_empty(migrations_to_apply), Ok(option.None))
 
-  let assert Ok(latest_migration) = list.last(files_to_apply)
-  let new_version = version_from_filename(latest_migration)
+  let migration_sql =
+    migrations_to_apply
+    |> list.flat_map(fn(m) { m.queries_up })
+    |> string.join("\n")
+
+  let assert Ok(latest_migration) = list.last(migrations_to_apply)
+  let new_version = latest_migration.timestamp
 
   let new_version_sql = "insert into m25.version (version)
 values (timestamptz '" <> {
