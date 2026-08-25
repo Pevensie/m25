@@ -48,6 +48,7 @@ pub fn main() -> Nil {
         io.println("Running job with input: " <> input.value)
         Ok("Ok")
       },
+      retry_policy: m25.configured_retry,
       default_job_timeout: duration.hours(1),
       poll_interval: 5000,
       heartbeat_interval: 3000,

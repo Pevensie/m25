@@ -53,6 +53,8 @@ pub type Queue(input, output, error) {
     error_decoder: decode.Decoder(error),
     /// The handler function to process the job.
     handler_function: fn(JobContext, input) -> Result(output, error),
+    /// Classify a failure as terminal or select the delay before retrying.
+    retry_policy: fn(JobContext, JobFailure(error)) -> RetryDecision,
     /// How long a job may run before it is considered failed.
     default_job_timeout: duration.Duration,
     /// How frequently the queue manager should check the database for new jobs in milliseconds.
@@ -368,6 +370,26 @@ pub type JobContext {
   )
 }
 
+/// A failure returned by the handler or caused by the worker lifecycle.
+pub type JobFailure(error) {
+  HandlerError(error)
+  ProcessFailure(FailureReason)
+}
+
+/// Whether a failed attempt is terminal or should produce another attempt.
+pub type RetryDecision {
+  Retry(after: duration.Duration)
+  Terminal
+}
+
+/// Preserve the delay configured on the job.
+pub fn configured_retry(
+  context: JobContext,
+  _failure: JobFailure(error),
+) -> RetryDecision {
+  Retry(context.retry_delay)
+}
+
 fn failure_reason_to_string(failure_reason) {
   case failure_reason {
     Errored -> "error"
@@ -666,9 +688,28 @@ fn handle_errored_job(
   )
   case failed_job.rows {
     [] -> Error(JobNotFound(job_id))
-    [row] ->
-      retry_jobs_if_needed(conn, [row.id])
-      |> result.map_error(JobUpdateQueryError)
+    [row] -> {
+      let context =
+        JobContext(
+          id: JobId(row.id),
+          queue_name: row.queue_name,
+          attempt: row.attempt,
+          max_attempts: row.max_attempts,
+          retry_delay: duration.seconds(row.retry_delay),
+          unique_key: row.unique_key,
+        )
+      let decision = case context.attempt >= context.max_attempts {
+        True -> Terminal
+        False -> queue.retry_policy(context, HandlerError(error))
+      }
+      case decision {
+        Terminal -> Ok(Nil)
+        Retry(after:) ->
+          sql.retry_with_delay(conn, [row.id], duration_to_seconds_float(after))
+          |> result.replace(Nil)
+          |> result.map_error(JobUpdateQueryError)
+      }
+    }
     rows ->
       Error(TooManyJobsReturned(list.map(rows, fn(row) { JobId(row.id) })))
   }

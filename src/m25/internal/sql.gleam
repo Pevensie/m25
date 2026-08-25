@@ -954,6 +954,53 @@ pub fn retry_if_needed(db, arg_1) {
   |> pog.execute(db)
 }
 
+/// Runs the `retry_with_delay` query
+/// defined in `./src/m25/internal/sql/retry_with_delay.sql`.
+///
+/// > 🐿️ This function was generated automatically using v4.2.0 of
+/// > the [squirrel package](https://github.com/giacomocavalieri/squirrel).
+///
+pub fn retry_with_delay(db, arg_1, arg_2) {
+  let decoder = decode.map(decode.dynamic, fn(_) { Nil })
+
+  "insert into m25.job (
+    queue_name,
+    scheduled_at,
+    input,
+    timeout,
+    attempt,
+    max_attempts,
+    original_attempt_id,
+    previous_attempt_id,
+    retry_delay,
+    unique_key
+) (
+    select
+        queue_name,
+        now() + ($2 * interval '1 second') as scheduled_at,
+        input,
+        timeout,
+        attempt + 1 as attempt,
+        max_attempts,
+        coalesce(original_attempt_id, id) as original_attempt_id,
+        id as previous_attempt_id,
+        $2 * interval '1 second' as retry_delay,
+        unique_key
+    from m25.job
+    where id = any($1)
+        and attempt < max_attempts
+);
+"
+  |> pog.query
+  |> pog.parameter(pog.array(
+    fn(value) { pog.text(uuid.to_string(value)) },
+    arg_1,
+  ))
+  |> pog.parameter(pog.float(arg_2))
+  |> pog.returning(decoder)
+  |> pog.execute(db)
+}
+
 /// Runs the `succeed_job` query
 /// defined in `./src/m25/internal/sql/succeed_job.sql`.
 ///

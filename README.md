@@ -85,6 +85,23 @@ handler_function: fn(context, input) {
 }
 ```
 
+When a handler returns `Error`, the queue's `retry_policy` can select a dynamic
+delay or stop the chain:
+
+```gleam
+retry_policy: fn(context, failure) {
+  case failure {
+    m25.HandlerError(PermanentFailure) -> m25.Terminal
+    _ -> m25.Retry(after: exponential_delay(context.attempt))
+  }
+}
+```
+
+Handlers have the same context, so applications can record the expected
+retry/terminal decision before returning the error. M25 persists the error and
+then applies the queue policy. `Terminal` leaves the failed attempt without a
+child; reaching `max_attempts` also remains terminal.
+
 ## Tables
 
 This driver creates tables in the `m25` schema to store jobs.
