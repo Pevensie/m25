@@ -75,6 +75,16 @@ failed and retry according to the configured retry policy.
 Jobs that are stuck in an executing state will be cleaned up after a configurable
 timeout, and can be retried.
 
+Queue handlers receive a `JobContext` containing the job ID, queue name,
+attempt, maximum attempts, configured retry delay, and unique key:
+
+```gleam
+handler_function: fn(context, input) {
+  io.debug(#(m25.job_id_to_string(context.id), context.attempt))
+  process(input)
+}
+```
+
 ## Tables
 
 This driver creates tables in the `m25` schema to store jobs.

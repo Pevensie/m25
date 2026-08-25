@@ -44,7 +44,7 @@ pub fn main() -> Nil {
       output_decoder: decode.string,
       error_to_json: json.string,
       error_decoder: decode.string,
-      handler_function: fn(input) {
+      handler_function: fn(_, input) {
         io.println("Running job with input: " <> input.value)
         Ok("Ok")
       },
@@ -59,19 +59,19 @@ pub fn main() -> Nil {
     m25.Queue(
       ..success_queue,
       name: "fail-queue",
-      handler_function: fn(input: JobInput) {
+      handler_function: fn(_, input: JobInput) {
         Error("Failed with input: " <> input.value)
       },
     )
   let crash_queue =
-    m25.Queue(..success_queue, name: "crash-queue", handler_function: fn(_) {
+    m25.Queue(..success_queue, name: "crash-queue", handler_function: fn(_, _) {
       panic as "Crashed!"
     })
   let long_queue =
     m25.Queue(
       ..success_queue,
       name: "long-queue",
-      handler_function: fn(input: JobInput) {
+      handler_function: fn(_, input: JobInput) {
         process.sleep(20_000)
         Ok("Long job completed with input: " <> input.value)
       },

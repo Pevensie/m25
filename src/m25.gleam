@@ -52,7 +52,7 @@ pub type Queue(input, output, error) {
     /// A decoder to decode the JSON for the job error stored in the database.
     error_decoder: decode.Decoder(error),
     /// The handler function to process the job.
-    handler_function: fn(input) -> Result(output, error),
+    handler_function: fn(JobContext, input) -> Result(output, error),
     /// How long a job may run before it is considered failed.
     default_job_timeout: duration.Duration,
     /// How frequently the queue manager should check the database for new jobs in milliseconds.
@@ -356,6 +356,18 @@ pub type FailureReason {
   Crash
 }
 
+/// Metadata available to a handler for one durable attempt.
+pub type JobContext {
+  JobContext(
+    id: JobId,
+    queue_name: String,
+    attempt: Int,
+    max_attempts: Int,
+    retry_delay: duration.Duration,
+    unique_key: option.Option(String),
+  )
+}
+
 fn failure_reason_to_string(failure_reason) {
   case failure_reason {
     Errored -> "error"
@@ -379,6 +391,10 @@ fn failure_reason_from_string(reason: String) -> Result(FailureReason, Nil) {
 
 pub type JobId {
   JobId(value: uuid.Uuid)
+}
+
+pub fn job_id_to_string(id: JobId) -> String {
+  uuid.to_string(id.value)
 }
 
 pub type JobRecord(input, output, error) {
@@ -796,9 +812,8 @@ fn handle_queue_message(
               job_executor_spec(
                 state.conn,
                 state.queue,
-                job.id,
+                job,
                 state.queue.handler_function,
-                job.input,
                 state.self,
               )
               |> actor.start
@@ -1052,9 +1067,10 @@ type JobExecutorState(input, output, error) {
     conn: pog.Connection,
     queue: Queue(input, output, error),
     job_id: JobId,
+    context: JobContext,
     worker_pid: option.Option(process.Pid),
     manager: process.Subject(QueueManagerMsg(input, output, error)),
-    work_func: fn(input) -> Result(output, error),
+    work_func: fn(JobContext, input) -> Result(output, error),
     input: input,
   )
 }
@@ -1062,9 +1078,8 @@ type JobExecutorState(input, output, error) {
 fn job_executor_spec(
   conn: pog.Connection,
   queue: Queue(input, output, error),
-  job_id: JobId,
-  work_func: fn(input) -> Result(output, error),
-  input,
+  job: JobRecord(input, output, error),
+  work_func: fn(JobContext, input) -> Result(output, error),
   manager_subject: process.Subject(QueueManagerMsg(input, output, error)),
 ) {
   actor.new_with_initialiser(queue.executor_init_timeout, fn(self) {
@@ -1074,7 +1089,7 @@ fn job_executor_spec(
       process.subject_owner(manager_subject)
       |> result.replace_error(
         "Failed to get queue manager PID for job ID: "
-        <> uuid.format(job_id.value, uuid.String),
+        <> uuid.format(job.id.value, uuid.String),
       ),
     )
 
@@ -1093,11 +1108,19 @@ fn job_executor_spec(
       self:,
       conn:,
       queue:,
-      job_id:,
+      job_id: job.id,
+      context: JobContext(
+        id: job.id,
+        queue_name: job.queue_name,
+        attempt: job.attempt,
+        max_attempts: job.max_attempts,
+        retry_delay: job.retry_delay,
+        unique_key: job.unique_key,
+      ),
       worker_pid: option.None,
       manager: manager_subject,
       work_func:,
-      input:,
+      input: job.input,
     )
     |> actor.initialised
     |> actor.selecting(selector)
@@ -1117,7 +1140,7 @@ fn handle_job_executor_message(
     // the 'reserved' state.
     StartWork -> {
       let worker_function = fn() {
-        let message = case state.work_func(state.input) {
+        let message = case state.work_func(state.context, state.input) {
           Ok(output) -> ExecutionSucceeded(output)
           Error(error) -> ExecutionFailed(error)
         }
