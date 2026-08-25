@@ -109,6 +109,13 @@ policy. This allows either lifecycle failure to stop without a child attempt or
 to use a dynamically selected delay. Previously heartbeat timeouts were marked
 failed without entering the retry transition.
 
+Job deadlines can be observed by the executor heartbeat or by queue polling.
+Failure finalization updates only an executing row, making those paths
+idempotent. When polling wins, M25 removes the timed-out executor from its
+in-memory running set before reserving replacement work, so the expired job
+cannot leak a concurrency slot. Deadline failures use
+`ProcessFailure(JobTimeout)` and the queue retry policy.
+
 ## Tables
 
 This driver creates tables in the `m25` schema to store jobs.

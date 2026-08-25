@@ -366,7 +366,7 @@ pub fn fail_job(db, arg_1, arg_2) {
 set
     failure_reason = $2,
     finished_at = now()
-where id = $1
+where id = $1 and status = 'executing'
 returning
     id,
     queue_name,

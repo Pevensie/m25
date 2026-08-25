@@ -532,16 +532,51 @@ pub fn queue_timeout_test() {
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("X"))
+  let assert Ok(job) =
+    m25.enqueue(conn, queue, m25.new_job("X") |> m25.retry(2, option.None))
   let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
-  wait_until("job times out", 10_000, fn() {
-    case last_failure_reason(conn, original_id) {
-      Ok(option.Some("job_timeout")) -> True
-      _ -> False
-    }
+  wait_until("job timeout follows retry policy", 10_000, fn() {
+    chain_completed_attempt_count(conn, original_id) == Ok(2)
+    && last_failure_reason(conn, original_id) == Ok(option.Some("job_timeout"))
+  })
+
+  process.send_exit(started.pid)
+}
+
+pub fn timed_out_job_releases_concurrency_slot_test() {
+  use conn <- with_test_db
+
+  let queue =
+    m25.Queue(
+      ..default_test_queue(),
+      name: "int-timeout-slot-" <> uuid(),
+      max_concurrency: 1,
+      handler_function: fn(_, input) {
+        case input {
+          "slow" -> {
+            process.sleep(3000)
+            Ok("slow")
+          }
+          _ -> Ok("fast")
+        }
+      },
+      default_job_timeout: duration.seconds(1),
+    )
+  let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
+  let assert Ok(slow) = m25.enqueue(conn, queue, m25.new_job("slow"))
+  let assert Ok(fast) = m25.enqueue(conn, queue, m25.new_job("fast"))
+  let slow_id = uuid.to_string(slow.id.value)
+  let fast_id = uuid.to_string(fast.id.value)
+  let assert Ok(started) = m25.start(app, 5000)
+
+  wait_until("slow job times out", 10_000, fn() {
+    last_failure_reason(conn, slow_id) == Ok(option.Some("job_timeout"))
+  })
+  wait_until("replacement job uses released slot", 5000, fn() {
+    job_status(conn, fast_id) == Ok("succeeded")
   })
 
   process.send_exit(started.pid)
