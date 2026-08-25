@@ -66,6 +66,7 @@ fn default_test_queue() {
     error_decoder: decode.string,
     error_to_json: json.string,
     handler_function: fn(_, _) { Ok("") },
+    retry_policy: m25.configured_retry,
     default_job_timeout: duration.seconds(5),
     poll_interval: 50,
     heartbeat_interval: 500,
@@ -401,25 +402,25 @@ pub fn retry_immediate_delay_test() {
   process.send_exit(started.pid)
 }
 
-pub fn retry_delay_spacing_test() {
+pub fn retry_policy_controls_delay_test() {
   use conn <- with_test_db
 
+  let delay = duration.seconds(2)
   let queue =
     m25.Queue(
       ..default_test_queue(),
       name: "int-retry-spacing-" <> uuid(),
       handler_function: fn(_, _) { Error("boom") },
+      retry_policy: fn(_, _) { m25.Retry(after: delay) },
     )
 
-  let delay = duration.seconds(2)
-  let job = m25.new_job("X") |> m25.retry(2, option.Some(delay))
+  let job = m25.new_job("X") |> m25.retry(2, option.None)
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
   let assert Ok(job) = m25.enqueue(conn, queue, job)
   let original_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
 
-  // Wait until 2 attempts completed
   wait_until("2 attempts appear", 10_000, fn() {
     case chain_completed_attempt_count(conn, original_id) {
       Ok(count) -> count >= 2
@@ -428,11 +429,34 @@ pub fn retry_delay_spacing_test() {
   })
 
   let assert Ok(times) = attempt_times(conn, original_id)
-  // Expect at least two attempts
   let assert [first, second, ..] = times
   let assert #(1, option.Some(finished1), _, _) = first
   let assert #(2, _, option.Some(started2), _) = second
   assert started2 - finished1 >= 2
+
+  process.send_exit(started.pid)
+}
+
+pub fn terminal_retry_decision_dead_letters_without_child_test() {
+  use conn <- with_test_db
+
+  let queue =
+    m25.Queue(
+      ..default_test_queue(),
+      name: "int-terminal-" <> uuid(),
+      handler_function: fn(_, _) { Error("permanent") },
+      retry_policy: fn(_, _) { m25.Terminal },
+    )
+  let job = m25.new_job("X") |> m25.retry(3, option.None)
+  let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
+  let assert Ok(job) = m25.enqueue(conn, queue, job)
+  let original_id = uuid.to_string(job.id.value)
+  let assert Ok(started) = m25.start(app, 5000)
+
+  wait_until("terminal attempt fails", 5000, fn() {
+    job_status(conn, original_id) == Ok("failed")
+  })
+  let assert Ok(1) = chain_completed_attempt_count(conn, original_id)
 
   process.send_exit(started.pid)
 }
