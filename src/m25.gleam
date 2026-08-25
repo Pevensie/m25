@@ -727,7 +727,7 @@ fn handle_failed_job(
     |> result.map_error(JobUpdateQueryError),
   )
   case failed_job.rows {
-    [] -> Error(JobNotFound(job_id))
+    [] -> Ok(Nil)
     [row] -> {
       let context =
         JobContext(
@@ -753,10 +753,6 @@ fn handle_failed_job(
     rows ->
       Error(TooManyJobsReturned(list.map(rows, fn(row) { JobId(row.id) })))
   }
-}
-
-fn retry_jobs_if_needed(conn: pog.Connection, job_ids: List(uuid.Uuid)) {
-  sql.retry_if_needed(conn, job_ids)
 }
 
 // ----- Queue manager ----- //
@@ -842,31 +838,66 @@ fn handle_queue_message(
 
           use _ <- result.try(
             timed_out.rows
-            |> list.map(fn(row) { row.id })
-            |> retry_jobs_if_needed(conn, _)
+            |> list.try_map(fn(row) {
+              let context =
+                JobContext(
+                  id: JobId(row.id),
+                  queue_name: state.queue.name,
+                  attempt: row.attempt,
+                  max_attempts: row.max_attempts,
+                  retry_delay: duration.seconds(row.retry_delay),
+                  unique_key: row.unique_key,
+                )
+              let decision = case context.attempt >= context.max_attempts {
+                True -> Terminal
+                False ->
+                  state.queue.retry_policy(context, ProcessFailure(JobTimeout))
+              }
+              case decision {
+                Terminal -> Ok(Nil)
+                Retry(after:) ->
+                  sql.retry_with_delay(
+                    conn,
+                    [row.id],
+                    duration_to_seconds_float(after),
+                  )
+                  |> result.replace(Nil)
+              }
+            })
             |> result.map_error(fn(err) {
-              ProcessJobsQueryError(when: "retrying jobs", error: err)
+              ProcessJobsQueryError(when: "retrying timed out jobs", error: err)
             }),
           )
 
-          let limit =
+          let timed_out_ids =
+            list.map(timed_out.rows, fn(row) { JobId(row.id) })
+          let active_count =
             int.max(
-              state.queue.max_concurrency - bimap.size(state.running_jobs),
+              bimap.size(state.running_jobs) - list.length(timed_out_ids),
               0,
             )
+          let limit = int.max(state.queue.max_concurrency - active_count, 0)
 
-          use <- bool.guard(when: limit == 0, return: Ok([]))
+          use <- bool.guard(when: limit == 0, return: Ok(#([], timed_out_ids)))
 
           use reserved_jobs <- result.try(
             reserve_jobs(conn, state.queue, limit)
             |> result.map_error(ProcessJobsFetchError),
           )
 
-          Ok(reserved_jobs)
+          Ok(#(reserved_jobs, timed_out_ids))
         })
 
       case reserved_jobs_result {
-        Ok(reserved_jobs) -> {
+        Ok(#(reserved_jobs, timed_out_ids)) -> {
+          let running_jobs =
+            list.fold(timed_out_ids, state.running_jobs, fn(running, job_id) {
+              case bimap.get_by_key(running, job_id) {
+                Ok(pid) -> process.send_exit(pid)
+                Error(Nil) -> Nil
+              }
+              bimap.delete_by_key(running, job_id)
+            })
           // Phase 2: Start actors outside transaction
           let #(started, start_errors) =
             list.map(reserved_jobs, fn(job) {
@@ -901,7 +932,7 @@ fn handle_queue_message(
           case finalize_result {
             Ok(_) -> {
               let running_jobs =
-                list.fold(started, state.running_jobs, fn(running, job_data) {
+                list.fold(started, running_jobs, fn(running, job_data) {
                   process.monitor(job_data.1.1)
                   process.send(job_data.1.0, StartWork)
                   bimap.insert(running, job_data.0, job_data.1.1)
@@ -1231,9 +1262,11 @@ fn handle_job_executor_message(
         Ok(timed_out) -> {
           case timed_out.rows {
             [sql.HeartbeatRow(deadline_passed: True, ..)] -> {
-              // If past deadline, just kill - queue manager will handle marking as timed
-              // out and retrying
               option.map(state.worker_pid, process.kill)
+              process.send(
+                state.manager,
+                JobProcessFailed(state.job_id, JobTimeout),
+              )
               actor.stop()
             }
             [sql.HeartbeatRow(heartbeat_timed_out: False, ..)] -> {
