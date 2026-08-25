@@ -65,7 +65,7 @@ fn default_test_queue() {
     output_to_json: json.string,
     error_decoder: decode.string,
     error_to_json: json.string,
-    handler_function: fn(_) { Ok("") },
+    handler_function: fn(_, _) { Ok("") },
     default_job_timeout: duration.seconds(5),
     poll_interval: 50,
     heartbeat_interval: 500,
@@ -212,15 +212,25 @@ fn attempt_times(
 pub fn success_job_flow_test() {
   use conn <- with_test_db
 
+  let observed = process.new_subject()
+  let queue_name = "int-success-" <> uuid()
   let queue =
     m25.Queue(
       ..default_test_queue(),
-      name: "int-success-" <> uuid(),
-      handler_function: fn(input) { Ok("ok: " <> input) },
+      name: queue_name,
+      handler_function: fn(context, input) {
+        process.send(observed, context)
+        Ok("ok: " <> input)
+      },
     )
 
+  let unique_key = "context-" <> uuid()
+  let job =
+    m25.new_job("A")
+    |> m25.retry(3, option.Some(duration.seconds(2)))
+    |> m25.unique_key(unique_key)
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("A"))
+  let assert Ok(job) = m25.enqueue(conn, queue, job)
   let job_id = uuid.to_string(job.id.value)
 
   let assert Ok(started) = m25.start(app, 5000)
@@ -231,6 +241,18 @@ pub fn success_job_flow_test() {
       _ -> False
     }
   })
+  let assert Ok(m25.JobContext(
+    id: context_id,
+    queue_name: observed_queue,
+    attempt: 1,
+    max_attempts: 3,
+    retry_delay: observed_delay,
+    unique_key: option.Some(observed_key),
+  )) = process.receive(observed, within: 1000)
+  assert m25.job_id_to_string(context_id) == job_id
+  assert observed_queue == queue_name
+  assert observed_delay == duration.seconds(2)
+  assert observed_key == unique_key
 
   process.send_exit(started.pid)
 }
@@ -242,7 +264,7 @@ pub fn unique_key_conflict_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-uniq-" <> uuid(),
-      handler_function: fn(input) { Ok(input) },
+      handler_function: fn(_, input) { Ok(input) },
     )
 
   let key = "k-" <> uuid()
@@ -263,7 +285,7 @@ pub fn unique_key_after_failure_allows_enqueue_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-uniq-after-fail-" <> uuid(),
-      handler_function: fn(_) { Error("boom") },
+      handler_function: fn(_, _) { Error("boom") },
     )
 
   let key = "k-" <> uuid()
@@ -297,7 +319,7 @@ pub fn unique_key_after_success_blocks_enqueue_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-uniq-after-success-" <> uuid(),
-      handler_function: fn(input) { Ok(input) },
+      handler_function: fn(_, input) { Ok(input) },
     )
 
   let key = "k-" <> uuid()
@@ -329,7 +351,7 @@ pub fn failing_job_retries_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-retry-fail-" <> uuid(),
-      handler_function: fn(_) { Error("boom") },
+      handler_function: fn(_, _) { Error("boom") },
     )
 
   let job = m25.new_job("X") |> m25.retry(3, option.Some(duration.seconds(1)))
@@ -359,7 +381,7 @@ pub fn retry_immediate_delay_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-retry-immediate-" <> uuid(),
-      handler_function: fn(_) { Error("boom") },
+      handler_function: fn(_, _) { Error("boom") },
     )
 
   let job = m25.new_job("X") |> m25.retry(2, option.None)
@@ -386,7 +408,7 @@ pub fn retry_delay_spacing_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-retry-spacing-" <> uuid(),
-      handler_function: fn(_) { Error("boom") },
+      handler_function: fn(_, _) { Error("boom") },
     )
 
   let delay = duration.seconds(2)
@@ -422,7 +444,7 @@ pub fn crash_job_retries_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-retry-crash-" <> uuid(),
-      handler_function: fn(_) { panic as "crash" },
+      handler_function: fn(_, _) { panic as "crash" },
     )
 
   let job =
@@ -453,7 +475,7 @@ pub fn queue_timeout_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-queue-timeout-" <> uuid(),
-      handler_function: fn(_) {
+      handler_function: fn(_, _) {
         process.sleep(3000)
         Ok("done")
       },
@@ -484,7 +506,7 @@ pub fn job_timeout_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-job-timeout-" <> uuid(),
-      handler_function: fn(_) {
+      handler_function: fn(_, _) {
         process.sleep(3000)
         Ok("done")
       },
@@ -562,7 +584,7 @@ pub fn heartbeat_timeout_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-heartbeat-" <> uuid(),
-      handler_function: fn(_) {
+      handler_function: fn(_, _) {
         process.sleep(5000)
         Ok("done")
       },
@@ -593,7 +615,7 @@ pub fn heartbeat_no_timeout_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-heartbeat-ok-" <> uuid(),
-      handler_function: fn(_) {
+      handler_function: fn(_, _) {
         process.sleep(800)
         Ok("done")
       },
@@ -646,7 +668,7 @@ pub fn max_concurrency_cap_test() {
       ..default_test_queue(),
       name: "int-concurrency-" <> uuid(),
       max_concurrency: 2,
-      handler_function: fn(_) {
+      handler_function: fn(_, _) {
         process.sleep(1500)
         Ok("done")
       },
@@ -682,7 +704,7 @@ pub fn deadline_started_at_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-deadline-" <> uuid(),
-      handler_function: fn(_) {
+      handler_function: fn(_, _) {
         process.sleep(3000)
         Ok("done")
       },
@@ -730,7 +752,7 @@ pub fn scheduled_future_and_past_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-schedule-" <> uuid(),
-      handler_function: fn(input) { Ok("ok: " <> input) },
+      handler_function: fn(_, input) { Ok("ok: " <> input) },
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
@@ -781,7 +803,7 @@ pub fn persistence_output_and_error_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-error-" <> uuid(),
-      handler_function: fn(_) { Error("boom") },
+      handler_function: fn(_, _) { Error("boom") },
     )
 
   let assert Ok(app) =
@@ -876,7 +898,7 @@ pub fn decode_failure_insert_test() {
       name: "int-decode-fail-" <> uuid(),
       input_decoder: decode.int,
       input_to_json: fn(_) { json.string("not-an-int") },
-      handler_function: fn(_) {
+      handler_function: fn(_, _) {
         // This shouldn't run
         process.kill(test_process)
         Error("unreachable")
@@ -943,7 +965,7 @@ pub fn cancelled_job_is_not_executed_test() {
     m25.Queue(
       ..default_test_queue(),
       name: "int-cancel-no-exec-" <> uuid(),
-      handler_function: fn(_) {
+      handler_function: fn(_, _) {
         // If this runs, something went wrong; but we also assert status later
         Ok("done")
       },
