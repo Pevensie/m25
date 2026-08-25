@@ -492,6 +492,31 @@ pub fn crash_job_retries_test() {
   process.send_exit(started.pid)
 }
 
+pub fn crash_respects_terminal_retry_policy_test() {
+  use conn <- with_test_db
+
+  let queue =
+    m25.Queue(
+      ..default_test_queue(),
+      name: "int-terminal-crash-" <> uuid(),
+      handler_function: fn(_, _) { panic as "crash" },
+      retry_policy: fn(_, _) { m25.Terminal },
+    )
+  let job = m25.new_job("X") |> m25.retry(3, option.None)
+  let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
+  let assert Ok(job) = m25.enqueue(conn, queue, job)
+  let original_id = uuid.to_string(job.id.value)
+  let assert Ok(started) = m25.start(app, 5000)
+
+  wait_until("terminal crash fails", 5000, fn() {
+    job_status(conn, original_id) == Ok("failed")
+  })
+  process.sleep(250)
+  let assert Ok(1) = chain_completed_attempt_count(conn, original_id)
+
+  process.send_exit(started.pid)
+}
+
 pub fn queue_timeout_test() {
   use conn <- with_test_db
 
@@ -617,14 +642,16 @@ pub fn heartbeat_timeout_test() {
     )
 
   let assert Ok(app) = m25.new(conn) |> m25.add_queue(queue)
-  let assert Ok(job) = m25.enqueue(conn, queue, m25.new_job("X"))
+  let assert Ok(job) =
+    m25.enqueue(conn, queue, m25.new_job("X") |> m25.retry(2, option.None))
   let original_id = uuid.to_string(job.id.value)
-
   let assert Ok(started) = m25.start(app, 5000)
 
-  wait_until("final failure reason=heartbeat_timeout", 10_000, fn() {
-    case last_failure_reason(conn, original_id) {
-      Ok(option.Some("heartbeat_timeout")) -> True
+  wait_until("heartbeat timeout follows retry policy", 10_000, fn() {
+    case chain_completed_attempt_count(conn, original_id) {
+      Ok(2) ->
+        last_failure_reason(conn, original_id)
+        == Ok(option.Some("heartbeat_timeout"))
       _ -> False
     }
   })

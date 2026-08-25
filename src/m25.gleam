@@ -717,19 +717,39 @@ fn handle_errored_job(
 
 fn handle_failed_job(
   conn: pog.Connection,
+  queue: Queue(input, output, error),
   job_id: JobId,
   failure_reason: FailureReason,
 ) {
   use conn <- pog.transaction(conn)
-  use crashed_job <- result.try(
+  use failed_job <- result.try(
     fail_job(conn, job_id, failure_reason)
     |> result.map_error(JobUpdateQueryError),
   )
-  case crashed_job.rows {
+  case failed_job.rows {
     [] -> Error(JobNotFound(job_id))
-    [row] ->
-      retry_jobs_if_needed(conn, [row.id])
-      |> result.map_error(JobUpdateQueryError)
+    [row] -> {
+      let context =
+        JobContext(
+          id: JobId(row.id),
+          queue_name: row.queue_name,
+          attempt: row.attempt,
+          max_attempts: row.max_attempts,
+          retry_delay: duration.seconds(row.retry_delay),
+          unique_key: row.unique_key,
+        )
+      let decision = case context.attempt >= context.max_attempts {
+        True -> Terminal
+        False -> queue.retry_policy(context, ProcessFailure(failure_reason))
+      }
+      case decision {
+        Terminal -> Ok(Nil)
+        Retry(after:) ->
+          sql.retry_with_delay(conn, [row.id], duration_to_seconds_float(after))
+          |> result.replace(Nil)
+          |> result.map_error(JobUpdateQueryError)
+      }
+    }
     rows ->
       Error(TooManyJobsReturned(list.map(rows, fn(row) { JobId(row.id) })))
   }
@@ -746,7 +766,7 @@ type QueueManagerMsg(input, output, error) {
   WorkSucceeded(job_id: JobId, output: output)
   WorkFailed(job_id: JobId, error: error)
   JobExecutorDown(process.Down)
-  JobWorkerDown(job_id: JobId)
+  JobProcessFailed(job_id: JobId, reason: FailureReason)
   Shutdown
 }
 
@@ -1043,7 +1063,7 @@ fn handle_queue_message(
         Ok(job_id) -> {
           case
             retry_exponential(3, fn() {
-              handle_failed_job(state.conn, job_id, Crash)
+              handle_failed_job(state.conn, state.queue, job_id, Crash)
             })
           {
             Ok(_) -> Nil
@@ -1062,17 +1082,17 @@ fn handle_queue_message(
         }
       }
     }
-    JobWorkerDown(job_id:) -> {
+    JobProcessFailed(job_id:, reason:) -> {
       case
         retry_exponential(3, fn() {
-          handle_failed_job(state.conn, job_id, Crash)
+          handle_failed_job(state.conn, state.queue, job_id, reason)
         })
       {
         Ok(_) -> Nil
         Error(query_error) ->
           logging.log(
             logging.Error,
-            "Query error when failing job due to downed worker for job "
+            "Query error when failing job due to worker lifecycle for job "
               <> uuid.to_string(job_id.value)
               <> ": "
               <> string.inspect(query_error),
@@ -1226,21 +1246,10 @@ fn handle_job_executor_message(
             }
             [sql.HeartbeatRow(heartbeat_timed_out: True, ..)] -> {
               option.map(state.worker_pid, process.kill)
-              case
-                retry_exponential(3, fn() {
-                  fail_job(state.conn, state.job_id, HeartbeatTimeout)
-                })
-              {
-                Ok(_) -> Nil
-                Error(query_error) ->
-                  logging.log(
-                    logging.Error,
-                    "Query error when failing job due to heartbeat timeout for job "
-                      <> uuid.to_string(state.job_id.value)
-                      <> ": "
-                      <> string.inspect(query_error),
-                  )
-              }
+              process.send(
+                state.manager,
+                JobProcessFailed(state.job_id, HeartbeatTimeout),
+              )
               actor.stop()
             }
             [] -> actor.continue(state)
@@ -1271,7 +1280,7 @@ fn handle_job_executor_message(
       case exit_message.reason {
         process.Normal | process.Killed -> actor.stop()
         process.Abnormal(_) -> {
-          process.send(state.manager, JobWorkerDown(state.job_id))
+          process.send(state.manager, JobProcessFailed(state.job_id, Crash))
           actor.stop()
         }
       }
@@ -1280,7 +1289,7 @@ fn handle_job_executor_message(
       option.map(state.worker_pid, process.kill)
       case
         retry_exponential(3, fn() {
-          handle_failed_job(state.conn, state.job_id, Crash)
+          handle_failed_job(state.conn, state.queue, state.job_id, Crash)
         })
       {
         Ok(_) -> Nil

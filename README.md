@@ -102,6 +102,13 @@ retry/terminal decision before returning the error. M25 persists the error and
 then applies the queue policy. `Terminal` leaves the failed attempt without a
 child; reaching `max_attempts` also remains terminal.
 
+Worker crashes and heartbeat timeouts cannot return through the handler. M25
+converts them to `ProcessFailure(Crash)` and
+`ProcessFailure(HeartbeatTimeout)` respectively, then applies the same queue
+policy. This allows either lifecycle failure to stop without a child attempt or
+to use a dynamically selected delay. Previously heartbeat timeouts were marked
+failed without entering the retry transition.
+
 ## Tables
 
 This driver creates tables in the `m25` schema to store jobs.
